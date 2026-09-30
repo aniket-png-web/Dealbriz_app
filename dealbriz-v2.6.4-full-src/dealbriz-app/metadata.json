@@ -1,0 +1,6 @@
+{
+  "name": "DealBriz - Buy & Sell Near You",
+  "description": "Android mobile app mirroring DealBriz.com for buying, selling, local classifieds, EMI calculations, and verified seller chats.",
+  "requestFramePermissions": ["geolocation", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

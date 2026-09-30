@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+:root {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  /* Tells the WebView to render native form controls, scrollbars and the
+     overscroll glow for a light UI. Without it Android keeps drawing the dark
+     variants over a light page. */
+  color-scheme: light;
+  background-color: #f5f7fa;
+}
+
+html,
+body {
+  background-color: #f5f7fa;
+  color: #0f172a;
+}
+
+/* Hide scrollbars on mobile carousels while keeping scrollability */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Edge-to-edge safe areas.
+   Android 15 forces edge-to-edge, so without these the top bar sits under the
+   status bar and the bottom nav under the gesture pill. */
+.db-safe-top {
+  padding-top: calc(env(safe-area-inset-top, 0px) + var(--db-safe-top-extra, 0px));
+}
+.db-safe-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px));
+}
+.db-app-shell {
+  height: 100dvh;
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Bottom sheets are flex-end children of a `fixed inset-0` overlay, so their
+   last row lands underneath the system navigation bar on devices that use
+   on-screen buttons. Pad the sheet by the bottom inset so the content clears
+   it; the sheet's own background still runs to the bottom of the window, so it
+   reads as flush rather than floating above the nav bar.
+
+   Written unlayered (Tailwind utilities live in @layer utilities), so these win
+   over the `p-5` / `p-0` on the same element. Two variants: -p5 keeps the
+   1.25rem the sheet already had, the plain one is for sheets that pad their
+   own inner footer. --db-safe-bottom-extra is the escape hatch if a WebView
+   reports a 0px inset. */
+.db-sheet-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px));
+}
+/* Clearance under a sticky action bar that is itself padded by the nav-bar
+   inset: the bar's own height plus that inset. */
+.db-scroll-clear-actionbar {
+  padding-bottom: calc(
+    6rem + env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px)
+  );
+}
+/* Floating UI above the bottom nav.
+   The nav is ~3.5rem of content plus env(safe-area-inset-bottom) of padding,
+   so a fixed `bottom-16` clears it on a gesture-nav phone and collides with it
+   on one with on-screen buttons - which is exactly why the AI Help pill landed
+   under the tab bar on some devices and not others. */
+.db-above-nav {
+  bottom: calc(4.25rem + env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px));
+}
+.db-above-nav-lg {
+  bottom: calc(6rem + env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px));
+}
+.db-sheet-bottom-p3 {
+  padding-bottom: calc(
+    env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px) + 0.75rem
+  );
+}
+.db-sheet-bottom-p5 {
+  padding-bottom: calc(
+    env(safe-area-inset-bottom, 0px) + var(--db-safe-bottom-extra, 0px) + 1.25rem
+  );
+}
+
+/* Android touch feel */
+.android-ripple {
+  position: relative;
+  overflow: hidden;
+}
+.android-ripple:active {
+  transform: scale(0.98);
+  transition: transform 0.08s ease-out;
+}
+
+/* Leaflet map isolation - creates a strict stacking context (z-index: 0, isolation: isolate) so Leaflet internal panes (200-800) never breach modals (which have z-index: 100) */
+.dealbriz-map-wrapper {
+  isolation: isolate;
+  position: relative;
+  z-index: 0;
+}
+
+.dealbriz-map-wrapper .leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #e2e8f0;
+  font-family: inherit;
+}
+
+/* Ensure Leaflet tiles and images are never squashed or hidden by Tailwind resets */
+.dealbriz-map-wrapper .leaflet-tile-container img {
+  max-width: none !important;
+  max-height: none !important;
+  display: block;
+}
+
+.dealbriz-map-wrapper .leaflet-container img {
+  max-width: none !important;
+}
+
+/* High-contrast custom popup styling */
+.dealbriz-map-wrapper .leaflet-popup-content-wrapper {
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 14px;
+  border: 1px solid #334155;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6);
+  padding: 0;
+  overflow: hidden;
+}
+
+.dealbriz-map-wrapper .leaflet-popup-content {
+  margin: 8px 10px;
+  line-height: 1.4;
+}
+
+.dealbriz-map-wrapper .leaflet-popup-tip {
+  background: #0f172a;
+  border: 1px solid #334155;
+}
+
+.dealbriz-map-wrapper .leaflet-popup-close-button {
+  color: #94a3b8 !important;
+  padding: 4px 6px 0 0 !important;
+}
+
