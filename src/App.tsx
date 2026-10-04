@@ -153,11 +153,50 @@ export default function App() {
     setShowAuthModal(true);
   };
 
-  // Initialize Firebase connection & OneSignal web push
+  // Initialize Firebase connection & OneSignal push
   useEffect(() => {
     testFirestoreConnection().catch(() => {});
     oneSignalService.initOneSignal().catch(() => {});
   }, []);
+
+  /**
+   * Ask for notification permission once, shortly after launch.
+   *
+   * Android 13+ requires an explicit POST_NOTIFICATIONS grant - without it the
+   * device never subscribes and no push ever arrives. The delay lets the app
+   * paint first, so the system dialog doesn't land on a blank screen. Asked
+   * once per install: if the user declines, Android won't show the dialog
+   * again anyway, and nagging on every launch is how apps get uninstalled.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const t = window.setTimeout(async () => {
+      if (cancelled) return;
+      try {
+        if (localStorage.getItem('dealbriz_push_asked_v1')) return;
+        const status = oneSignalService.getStatus();
+        if (status.hasPermission) return;
+        localStorage.setItem('dealbriz_push_asked_v1', '1');
+        await oneSignalService.requestNotificationPermission();
+      } catch {
+        // ignore
+      }
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, []);
+
+  /**
+   * Tie the device subscription to the signed-in account, so the server knows
+   * who to notify. Runs on every sign-in because the subscription id can change
+   * (reinstall, cleared data, token refresh).
+   */
+  useEffect(() => {
+    if (!userProfile.isAuthenticated || !userProfile.id) return;
+    oneSignalService.linkUser(String(userProfile.id), userProfile.email).catch(() => {});
+  }, [userProfile.isAuthenticated, userProfile.id, userProfile.email]);
 
   // Poll notification summary (Section 3.9: GET /api/notifications/summary)
   useEffect(() => {
