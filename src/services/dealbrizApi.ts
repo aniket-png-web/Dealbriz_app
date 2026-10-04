@@ -922,6 +922,30 @@ export const sellApi = {
 
 // 3.5 Profile API - GET/PUT /api/profile
 export const profileApi = {
+  /**
+   * Registers this device's OneSignal subscription id against the signed-in
+   * user, so the server can target them when a message arrives.
+   *
+   * The AI Studio integration wrote this to Firestore, which DealBriz doesn't
+   * use - the real user table is MySQL behind Flask, so it has to come here.
+   */
+  async registerPushDevice(playerId: string): Promise<void> {
+    if (!playerId) return;
+    await apiFetch('/profile/push-device', {
+      method: 'POST',
+      body: JSON.stringify({ player_id: playerId, platform: 'android' }),
+    });
+  },
+
+  /** Called on logout so a shared device stops receiving the old user's pushes. */
+  async unregisterPushDevice(playerId: string): Promise<void> {
+    if (!playerId) return;
+    await apiFetch('/profile/push-device', {
+      method: 'DELETE',
+      body: JSON.stringify({ player_id: playerId }),
+    });
+  },
+
   /** POST /api/profile/avatar - multipart, same "file" field as listing photos. */
   async uploadAvatar(file: File | Blob): Promise<string> {
     const form = new FormData();
