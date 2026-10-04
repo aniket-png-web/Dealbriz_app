@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DealBriz</string>
+    <string name="title_activity_main">DealBriz</string>
+    <string name="package_name">com.dealbriz.app</string>
+    <string name="custom_url_scheme">com.dealbriz.app</string>
+</resources>

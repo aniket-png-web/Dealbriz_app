@@ -1,0 +1,88 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "User profile with push notification preferences and OneSignal IDs",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "onesignalPlayerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "notificationsEnabled": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email"]
+    },
+    "notification": {
+      "title": "Notification",
+      "description": "Notification records received by the user via OneSignal or system",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "title", "message", "read"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "User profiles storing OneSignal IDs and push settings"
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": "notification",
+      "description": "Subcollection of notifications for a specific user"
+    }
+  }
+}
