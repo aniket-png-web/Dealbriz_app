@@ -1,6 +1,6 @@
 import OneSignal from 'react-onesignal';
 import { Capacitor } from '@capacitor/core';
-import { syncOneSignalToFirestore } from './firebase';
+import { profileApi } from './dealbrizApi';
 
 const STORAGE_KEY_APP_ID = 'dealbriz_onesignal_app_id';
 // Configured OneSignal App ID for DealBriz (com.dealbriz.app)
@@ -317,7 +317,7 @@ class OneSignalManager {
           }
           await this.refreshNativeState();
           if (userId && this.nativeSubscriptionId) {
-            await syncOneSignalToFirestore(userId, this.nativeSubscriptionId);
+            await profileApi.registerPushDevice(this.nativeSubscriptionId);
           }
           this.notify();
           return;
@@ -335,7 +335,7 @@ class OneSignalManager {
 
       const subId = OneSignal.User?.PushSubscription?.id;
       if (userId && subId) {
-        await syncOneSignalToFirestore(userId, subId);
+        await profileApi.registerPushDevice(subId);
       }
 
       this.notify();
