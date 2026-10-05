@@ -1,29 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import {
-  X,
-  Bell,
-  Zap,
-  Tag,
-  ShieldCheck,
-  CheckCheck,
-  Radio,
-  Settings2,
-  Send,
-  CheckCircle2,
-  ExternalLink,
-  Copy,
-  Check,
-  LogIn,
-  LogOut,
-  AlertCircle,
-  Sparkles,
-} from 'lucide-react';
-import {
-  oneSignalService,
-  OneSignalStatus,
-} from '../services/oneSignalService';
-import { auth, signInWithGoogle, logOutFirebase } from '../services/firebase';
-import { User as FirebaseUser, onAuthStateChanged } from 'firebase/auth';
+import { X, Bell, BellOff, Zap, Tag, ShieldCheck, CheckCheck } from 'lucide-react';
+import { oneSignalService, OneSignalStatus } from '../services/oneSignalService';
 
 interface NotificationItem {
   id: string;
@@ -38,6 +15,7 @@ interface NotificationsModalProps {
   onClose: () => void;
   notifications: NotificationItem[];
   onMarkAllRead: () => void;
+  /** Kept for App.tsx compatibility; nothing here invents notifications any more. */
   onNewNotification?: (item: NotificationItem) => void;
 }
 
@@ -45,108 +23,35 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   onClose,
   notifications,
   onMarkAllRead,
-  onNewNotification,
 }) => {
-  
-  const [oneSignalStatus, setOneSignalStatus] = useState<OneSignalStatus>(() =>
-    oneSignalService.getStatus()
-  );
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(auth.currentUser);
-  const [isSavingAppId, setIsSavingAppId] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(
-    null
-  );
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [testSending, setTestSending] = useState(false);
+  const [pushStatus, setPushStatus] = useState<OneSignalStatus>(() => oneSignalService.getStatus());
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const unsubOneSignal = oneSignalService.subscribe((status) => {
-      setOneSignalStatus(status);
-    });
-
-    const unsubAuth = onAuthStateChanged(auth, (user) => {
-      setFirebaseUser(user);
-      if (user) {
-        oneSignalService.linkUser(user.uid, user.email || undefined).catch(() => {});
+    const unsub = oneSignalService.subscribe(setPushStatus);
+    // Opening notifications is the "someone wants notifications" moment: if
+    // they're off and Android can still show its dialog, ask right away.
+    (async () => {
+      await oneSignalService.refresh();
+      const s = oneSignalService.getStatus();
+      if (s.isNative && !s.hasPermission && (await oneSignalService.canShowSystemPrompt())) {
+        await oneSignalService.requestNotificationPermission(false);
       }
-    });
-
-    return () => {
-      unsubOneSignal();
-      unsubAuth();
-    };
+    })().catch(() => {});
+    return unsub;
   }, []);
 
-  const handleCopy = (text: string, key: string) => {
-    navigator.clipboard?.writeText(text);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
-  };
-
-  const handleEnablePush = async () => {
-    setStatusMessage(null);
-    const granted = await oneSignalService.requestNotificationPermission();
-    if (granted) {
-      setStatusMessage({ type: 'success', text: 'Push notifications enabled successfully!' });
-    } else {
-      setStatusMessage({
-        type: 'error',
-        text: 'Notification permission was denied or blocked in browser settings.',
-      });
-    }
-  };
-
-  const handleSendTestPush = async () => {
-    setTestSending(true);
-    setStatusMessage(null);
+  // Explicit tap: shows the dialog, or opens Android Settings if the user refused before.
+  const handleTurnOn = async () => {
+    setBusy(true);
     try {
-      const title = 'DealBriz Push Alert 🔥';
-      const body = 'Instant price drop alert! New verified listings available in your area.';
-      const res = await oneSignalService.triggerTestNotification(title, body);
-
-      if (res.success) {
-        setStatusMessage({ type: 'success', text: 'Test push notification dispatched!' });
-        onNewNotification?.({
-          id: `test-${Date.now()}`,
-          title,
-          message: body,
-          time: 'Just now',
-          type: 'deal',
-          read: false,
-        });
-      } else {
-        setStatusMessage({
-          type: 'error',
-          text: res.message || 'Could not show notification. Enable push permissions first.',
-        });
-      }
+      await oneSignalService.requestNotificationPermission(true);
     } finally {
-      setTestSending(false);
+      setBusy(false);
     }
   };
 
-  const handleGoogleSignIn = async () => {
-    setStatusMessage(null);
-    try {
-      const user = await signInWithGoogle();
-      setStatusMessage({
-        type: 'success',
-        text: `Connected with Google (${user.email || 'account'})!`,
-      });
-      await oneSignalService.linkUser(user.uid, user.email || undefined);
-    } catch (err: any) {
-      setStatusMessage({
-        type: 'error',
-        text: err?.message || 'Google sign-in cancelled or failed.',
-      });
-    }
-  };
-
-  const handleSignOut = async () => {
-    await logOutFirebase();
-    await oneSignalService.unlinkUser();
-    setStatusMessage({ type: 'success', text: 'Signed out of Firebase.' });
-  };
+  const showOffBanner = pushStatus.isNative && pushStatus.pluginAvailable && !pushStatus.hasPermission;
 
   return (
     <div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -171,20 +76,24 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
         </div>
 
 
-        {statusMessage && (
-          <div
-            className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 ${
-              statusMessage.type === 'success'
-                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                : 'bg-rose-50 text-rose-800 border border-rose-200'
-            }`}
-          >
-            {statusMessage.type === 'success' ? (
-              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
-            ) : (
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
-            )}
-            <span className="flex-1">{statusMessage.text}</span>
+        {showOffBanner && (
+          <div className="mb-3 p-3 rounded-2xl bg-amber-50 border border-amber-200 flex items-start gap-3">
+            <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <BellOff className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-bold text-amber-900">Notifications are off</p>
+              <p className="text-[11px] text-amber-800 mt-0.5 leading-snug">
+                Turn them on to know when a buyer or seller messages you.
+              </p>
+              <button
+                onClick={handleTurnOn}
+                disabled={busy}
+                className="mt-2 px-3 py-1.5 rounded-lg bg-amber-600 text-white text-[11px] font-bold active:scale-95 transition-transform disabled:opacity-60"
+              >
+                {busy ? 'Opening…' : 'Turn on'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -206,12 +115,6 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               <div className="py-8 text-center text-slate-400">
                 <Bell className="w-8 h-8 mx-auto mb-2 opacity-40" />
                 <p className="text-xs">No notifications yet</p>
-                <button
-                  onClick={handleSendTestPush}
-                  className="mt-3 text-xs text-blue-600 font-semibold underline underline-offset-2"
-                >
-                  Send a test push notification
-                </button>
               </div>
             ) : (
               <div className="space-y-2.5">

@@ -1,0 +1,26 @@
+# --- Dependencies & build output ---
+node_modules/
+dist/
+server.js
+
+# --- Secrets: never commit these (the repo is PUBLIC) ---
+*.keystore
+*.jks
+keystore.properties
+google-services.json
+*firebase-adminsdk*.json
+*service-account*.json
+.env
+.env.*
+!.env.example
+
+# --- Android build artefacts ---
+*.apk
+*.aab
+*.idsig
+
+# --- OS / editor junk ---
+.DS_Store
+Thumbs.db
+.vscode/
+*.log

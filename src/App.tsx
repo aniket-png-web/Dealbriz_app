@@ -44,7 +44,7 @@ import { ReportModal } from './components/ReportModal';
 import { CATEGORIES } from './data/initialListings';
 import { dealbrizStorage } from './services/dealbrizStorage';
 import { testFirestoreConnection } from './services/firebase';
-import { oneSignalService } from './services/oneSignalService';
+import { oneSignalService, PushChatTarget } from './services/oneSignalService';
 import { syncLiveDealBrizListings } from './services/dealbrizLiveSync';
 import {
   threadId,
@@ -160,32 +160,29 @@ export default function App() {
   }, []);
 
   /**
-   * Ask for notification permission once, shortly after launch.
+   * Ask for notification permission on launch.
    *
-   * Android 13+ requires an explicit POST_NOTIFICATIONS grant - without it the
-   * device never subscribes and no push ever arrives. The delay lets the app
-   * paint first, so the system dialog doesn't land on a blank screen. Asked
-   * once per install: if the user declines, Android won't show the dialog
-   * again anyway, and nagging on every launch is how apps get uninstalled.
+   * Android 13+ needs an explicit POST_NOTIFICATIONS grant or no push ever
+   * arrives. The service only asks while permission is off AND Android will
+   * still show its dialog, so a user who refused isn't nagged every launch -
+   * they can turn it on from the bell instead. The short delay lets the first
+   * screen paint so the dialog doesn't land on a blank WebView.
    */
   useEffect(() => {
-    let cancelled = false;
-    const t = window.setTimeout(async () => {
-      if (cancelled) return;
-      try {
-        if (localStorage.getItem('dealbriz_push_asked_v1')) return;
-        const status = oneSignalService.getStatus();
-        if (status.hasPermission) return;
-        localStorage.setItem('dealbriz_push_asked_v1', '1');
-        await oneSignalService.requestNotificationPermission();
-      } catch {
-        // ignore
-      }
-    }, 2500);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(t);
+    const t = window.setTimeout(() => {
+      oneSignalService.promptOnLaunchIfNeeded().catch(() => {});
+    }, 1500);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  // Re-read the permission when the app comes back to the foreground - the
+  // user may have just enabled notifications in Android Settings.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') oneSignalService.refresh().catch(() => {});
     };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   /**
@@ -676,6 +673,65 @@ export default function App() {
     },
     [userProfile.id]
   );
+
+  /**
+   * Chat push notifications.
+   *
+   * Tap: open that thread. A tap that cold-started the app is held by the
+   * service until this handler is set, then waits here until the session is
+   * resolved, since the inbox can't load before that.
+   *
+   * Foreground: if the thread is already open on screen, don't show a banner
+   * (the 4s poll below will show the message); otherwise let it display and
+   * refresh the inbox so the unread badge updates.
+   */
+  const [pendingPushThread, setPendingPushThread] = useState<PushChatTarget | null>(null);
+  const activeChatIdRef = useRef<string | null>(null);
+  activeChatIdRef.current = activeChat?.id ?? null;
+  const refreshInboxRef = useRef(refreshInbox);
+  refreshInboxRef.current = refreshInbox;
+
+  useEffect(() => {
+    oneSignalService.setChatOpenHandler((t) => setPendingPushThread(t));
+    oneSignalService.setForegroundChatHandler((t) => {
+      const id = threadId(t.productId, t.otherUserId);
+      if (activeChatIdRef.current === id) return true;
+      refreshInboxRef.current().catch(() => {});
+      return false;
+    });
+    return () => {
+      oneSignalService.setChatOpenHandler(null);
+      oneSignalService.setForegroundChatHandler(null);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPushThread || !sessionResolved) return;
+    const target = pendingPushThread;
+    setPendingPushThread(null);
+    if (!userProfile.isAuthenticated || !userProfile.id) return;
+
+    const id = threadId(target.productId, target.otherUserId);
+    setActiveTab('chats');
+    (async () => {
+      let chat = chats.find((c) => c.id === id);
+      if (!chat) {
+        // A brand-new conversation won't be in the inbox we already have.
+        try {
+          const inbox = await loadInbox(listings);
+          setChats(inbox);
+          chat = inbox.find((c) => c.id === id);
+        } catch {
+          // offline - leave the user on the Chats tab
+        }
+      }
+      if (!chat) return;
+      setChatListingContext(listings.find((l) => l.id === chat!.listingId) || null);
+      setChats((prev) => prev.map((c) => (c.id === id ? { ...c, unreadCount: 0 } : c)));
+      setActiveChat({ ...chat, unreadCount: 0 });
+      openThreadFromInbox(chat);
+    })();
+  }, [pendingPushThread, sessionResolved, userProfile.isAuthenticated, userProfile.id, chats, listings, openThreadFromInbox]);
 
   // Poll the open thread every 4s (Section 3.7) so the other person's replies
   // arrive without a manual refresh. Delivery is poll-based - there is no push.
@@ -1671,6 +1727,8 @@ export default function App() {
           onOpenReportProblem={() => setShowReportProblemModal(true)}
           onOpenAuth={handleOpenAuth}
           onLogout={async () => {
+            // Before authApi.logout(): removing the push device needs the session cookie.
+            await oneSignalService.unlinkUser().catch(() => {});
             await authApi.logout();
             clearSessionCookies();
             sessionVerifiedRef.current = false;
