@@ -42,4 +42,17 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- "Use current location" in the city picker and the map's recentre button
+         call navigator.geolocation inside the WebView. Without these declared,
+         Android refuses the request before any permission dialog appears, which
+         surfaces as "couldn't fetch your location". COARSE is enough for
+         city-level matching; FINE improves the map centring. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- Photo capture from the sell form and profile avatar. The WebView hands
+         off to the camera app via intent, but the declaration is still required
+         on some OEM builds. -->
+    <uses-permission android:name="android.permission.CAMERA" />
 </manifest>
