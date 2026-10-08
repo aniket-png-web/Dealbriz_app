@@ -45,12 +45,11 @@ export const SearchResultsView: React.FC<SearchResultsViewProps> = ({
   onOpenFilters,
 }) => {
   const [sort, setSort] = useState<SortKey>('relevance');
-  const [quickFilter, setQuickFilter] = useState<'all' | 'nearby' | 'emi' | 'verified'>('all');
+  const [quickFilter, setQuickFilter] = useState<'all' | 'nearby' | 'emi'>('all');
 
   const shown = useMemo(() => {
     let list = [...results];
     if (quickFilter === 'emi') list = list.filter((l) => l.emi_eligible);
-    if (quickFilter === 'verified') list = list.filter((l) => l.is_verified_seller);
     if (quickFilter === 'nearby') {
       list = list.filter((l) => typeof l.distance_km === 'number');
       list.sort((a, b) => (a.distance_km ?? 1e9) - (b.distance_km ?? 1e9));
@@ -69,7 +68,6 @@ export const SearchResultsView: React.FC<SearchResultsViewProps> = ({
     { key: 'all', label: 'All' },
     { key: 'nearby', label: 'Nearby' },
     { key: 'emi', label: 'EMI' },
-    { key: 'verified', label: 'Verified' },
   ];
 
   return (
@@ -177,12 +175,6 @@ export const SearchResultsView: React.FC<SearchResultsViewProps> = ({
                     loading="lazy"
                     className="w-full h-full object-cover"
                   />
-                  {l.is_verified_seller && (
-                    <span className="absolute top-1 left-1 flex items-center gap-0.5 text-[8px] font-black px-1.5 py-0.5 rounded-full bg-amber-400 text-slate-900 shadow">
-                      <ShieldCheck className="w-2.5 h-2.5" />
-                      VERIFIED
-                    </span>
-                  )}
                 </div>
 
                 <div className="flex-1 min-w-0 py-0.5">

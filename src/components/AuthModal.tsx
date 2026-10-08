@@ -16,10 +16,6 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { authApi, AuthUser } from '../services/dealbrizApi';
-import { POPULAR_CITIES } from '../data/initialListings';
-import { signInWithGoogle } from '../services/firebase';
-import { oneSignalService } from '../services/oneSignalService';
-import { initialsAvatar } from '../utils/imageUtils';
 
 interface AuthModalProps {
   onClose: () => void;
@@ -47,7 +43,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
-  const [city, setCity] = useState('Chandigarh');
+  // 6-digit PIN code, like the website's sign-up. The server stores it in
+  // users.city and uses it as a PIN (EMI coverage, the seller's area).
+  const [pincode, setPincode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -79,16 +77,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         if (!email.trim()) {
           throw new Error('Please enter a valid email address.');
         }
+        // Same rule the server applies: 10 digits, optional +91, starting 6-9.
+        const phoneDigits = phone.replace(/\D/g, '').replace(/^91(?=\d{10}$)/, '');
+        if (!/^[6-9]\d{9}$/.test(phoneDigits) || /^(\d)\1{9}$/.test(phoneDigits)) {
+          throw new Error('Please enter a valid 10-digit mobile number.');
+        }
+        if (!/^\d{6}$/.test(pincode.trim())) {
+          throw new Error('Please enter your 6-digit PIN code.');
+        }
         if (password.length < 8) {
           throw new Error('Password must be at least 8 characters long.');
         }
+        // No stand-ins: a blank phone used to become +91 98000 00000 and the
+        // city "Chandigarh", and long city names from the old list didn't fit
+        // the column, so sign-up failed with a server error.
         user = await authApi.signup({
           email: email.trim(),
           password,
           first_name: firstName.trim(),
           last_name: lastName.trim(),
-          phone: phone.trim() || '+91 98000 00000',
-          city: city || 'Chandigarh',
+          phone: phoneDigits,
+          city: pincode.trim(),
         });
         setSuccessMsg(`Account created successfully! Welcome to DealBriz, ${user.first_name}!`);
       }
@@ -109,48 +118,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleGoogleAuth = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const fbUser = await signInWithGoogle();
-      const names = (fbUser.displayName || '').split(' ');
-      const fName = names[0] || fbUser.email?.split('@')[0] || 'DealBriz';
-      const lName = names.slice(1).join(' ') || 'User';
-
-      const appUser: AuthUser = {
-        id: fbUser.uid,
-        email: fbUser.email || 'redevilaed@gmail.com',
-        first_name: fName,
-        last_name: lName,
-        phone: fbUser.phoneNumber || '+91 98000 00000',
-        city: 'Chandigarh',
-        avatar_url: fbUser.photoURL || initialsAvatar(`${fName} ${lName}`),
-        is_admin: fbUser.email === 'redevilaed@gmail.com',
-        account_status: 'active',
-        created_at: new Date().toISOString(),
-      };
-
-      try {
-        localStorage.setItem('dealbriz_active_user', JSON.stringify(appUser));
-      } catch {
-        // ignore
-      }
-
-      await oneSignalService.linkUser(fbUser.uid, fbUser.email || undefined);
-
-      setSuccessMsg(`Welcome, ${fName}!`);
-      setTimeout(() => {
-        onSuccess(appUser);
-        onClose();
-      }, 500);
-    } catch (err: any) {
-      setError(err?.message || 'Google sign-in was cancelled or failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in">
       <div className="w-full max-w-sm bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl p-5 db-sheet-bottom-p5 shadow-2xl relative max-h-[92vh] overflow-y-auto no-scrollbar animate-in slide-in-from-bottom-6 duration-200">
@@ -164,7 +131,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <h3 className="font-extrabold text-sm text-slate-900">
                 {mode === 'login' ? 'Sign In to DealBriz' : 'Create DealBriz Account'}
               </h3>
-              <p className="text-[10px] text-slate-500">Buy, Sell & Chat with Verified Locals</p>
+              <p className="text-[10px] text-slate-500">Buy, Sell & Chat with People Near You</p>
             </div>
           </div>
           <button
@@ -174,40 +141,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           >
             <X className="w-4 h-4" />
           </button>
-        </div>
-
-        {/* Continue with Google button (Firebase Auth) */}
-        <button
-          type="button"
-          onClick={handleGoogleAuth}
-          disabled={loading}
-          className="w-full mb-3.5 py-2.5 px-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 hover:border-slate-400 text-slate-800 text-xs font-bold flex items-center justify-center gap-2.5 transition-all shadow-xs"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24">
-            <path
-              fill="#4285F4"
-              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-            />
-            <path
-              fill="#EA4335"
-              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-            />
-          </svg>
-          <span>Continue with Google</span>
-        </button>
-
-        <div className="relative flex py-1 items-center mb-3">
-          <div className="flex-grow border-t border-slate-200"></div>
-          <span className="shrink-0 mx-2 text-[10px] text-slate-600 font-medium">or with email</span>
-          <div className="flex-grow border-t border-slate-200"></div>
         </div>
 
         {/* Tab Switcher: Sign In vs Sign Up */}
@@ -296,7 +229,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
               </div>
 
-              {/* Phone & City */}
+              {/* Phone & PIN code */}
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[11px] font-semibold text-slate-600 block mb-1">
@@ -306,8 +239,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <Phone className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
                     <input
                       type="tel"
+                      inputMode="numeric"
                       required
-                      placeholder="+91 98765 43210"
+                      maxLength={14}
+                      placeholder="10-digit mobile"
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
                       className="w-full bg-white border border-slate-300 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-900 placeholder-slate-500 focus:outline-none focus:border-blue-500"
@@ -315,20 +250,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </div>
                 </div>
                 <div>
-                  <label className="text-[11px] font-semibold text-slate-600 block mb-1">City</label>
+                  <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                    PIN Code <span className="text-rose-600">*</span>
+                  </label>
                   <div className="relative">
                     <MapPin className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
-                    <select
-                      value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      className="w-full bg-white border border-slate-300 rounded-xl pl-9 pr-2 py-2 text-xs text-slate-900 focus:outline-none focus:border-blue-500 appearance-none"
-                    >
-                      {POPULAR_CITIES.filter((c) => c !== 'All Cities').map((c) => (
-                        <option key={c} value={c} className="bg-white text-slate-900">
-                          {c}
-                        </option>
-                      ))}
-                    </select>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      required
+                      maxLength={6}
+                      placeholder="e.g. 175001"
+                      value={pincode}
+                      onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      className="w-full bg-white border border-slate-300 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-900 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
+                    />
                   </div>
                 </div>
               </div>
@@ -402,7 +338,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             {loading ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Verifying...</span>
+                <span>{mode === 'login' ? 'Signing in…' : 'Creating account…'}</span>
               </>
             ) : mode === 'login' ? (
               <>

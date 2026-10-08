@@ -1,4 +1,4 @@
-import { INITIAL_LISTINGS, INITIAL_USER } from '../data/initialListings';
+import { INITIAL_USER } from '../data/initialListings';
 import { ChatConversation, EmiApplication, Listing, UserProfile } from '../types';
 import { initialsAvatar, defaultListingImage } from '../utils/imageUtils';
 
@@ -34,18 +34,22 @@ export const dealbrizStorage = {
         // An empty list is a valid state (the user deleted everything, or the
         // live catalogue is empty) - don't fall back to the seed data for it.
         if (Array.isArray(parsed) && (parsed.length > 0 || localStorage.getItem(LISTINGS_TOUCHED_KEY))) {
+          // Copies of the hardcoded listings this app used to show before the
+          // server answered. Those were the only ones with ratings and review
+          // counts (the API has neither), so a cache holding any is discarded.
           const hasFakeItems = parsed.some(
             (p) =>
               p.id.startsWith('dealbriz-') ||
               p.id.startsWith('live-dealbriz') ||
               p.image_url?.includes('unsplash.com') ||
-              p.seller_name === 'Rohit Thakur' ||
-              p.seller_name === 'Gurpreet Singh' ||
-              p.seller_name === 'Simran Kaur'
+              (p.seller_reviews_count || 0) > 0 ||
+              (p.seller_rating || 0) > 0
           );
           if (!hasFakeItems) {
             return parsed.map((item) => ({
               ...item,
+              // Cached copies from older versions held numbers.
+              seller_phone: '',
               image_url:
                 item.image_url && item.image_url.trim()
                   ? item.image_url.trim()
@@ -57,13 +61,21 @@ export const dealbrizStorage = {
     } catch {
       // ignore
     }
-    return INITIAL_LISTINGS;
+    // Nothing cached: start empty and let the server fill it. This returned a
+    // hardcoded set of old listings with made-up ratings and view counts,
+    // which a fresh install showed until the server answered - or for good
+    // when offline.
+    return [];
   },
 
   saveListings: (listings: Listing[]) => {
     try {
       localStorage.setItem(LISTINGS_TOUCHED_KEY, '1');
-      localStorage.setItem(STORAGE_KEYS.LISTINGS, JSON.stringify(listings));
+      // Never keep sellers' numbers on the phone (see dealbrizLiveSync).
+      localStorage.setItem(
+        STORAGE_KEYS.LISTINGS,
+        JSON.stringify(listings.map((l) => ({ ...l, seller_phone: '' })))
+      );
     } catch {
       // ignore
     }
@@ -104,6 +116,15 @@ export const dealbrizStorage = {
       // ignore
     }
     return [];
+  },
+
+  /** Saves now live on the account; the phone-only list is only read once to move it there. */
+  clearLegacySavedIds: () => {
+    try {
+      localStorage.removeItem(STORAGE_KEYS.SAVED_IDS);
+    } catch {
+      // ignore
+    }
   },
 
   toggleSaveId: (id: string): string[] => {

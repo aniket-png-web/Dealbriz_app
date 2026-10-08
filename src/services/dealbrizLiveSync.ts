@@ -28,7 +28,10 @@ export async function syncLiveDealBrizListings(): Promise<Listing[] | null> {
     const items = Array.isArray(data) ? data : data.items || data.products || [];
     if (!Array.isArray(items)) return null;
 
-    return items.map(mapDealBrizProductToListing);
+    // No phone numbers in the list. A copy kept in memory or on the phone
+    // went on showing a number after the seller hid it. The listing page
+    // fetches that one listing fresh and shows the number from that.
+    return items.map(mapDealBrizProductToListing).map((l) => ({ ...l, seller_phone: '' }));
   } catch {
     // Offline, DNS failure, timeout, ...
     return null;

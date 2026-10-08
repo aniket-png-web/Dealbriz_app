@@ -4,7 +4,6 @@ import {
   Heart,
   Share2,
   MapPin,
-  ShieldCheck,
   Zap,
   Phone,
   MessageCircle,
@@ -44,6 +43,8 @@ interface ListingDetailModalProps {
   viewerPhone?: string;
   /** The viewer's own show-number setting, used on their own listings. */
   viewerShowPhone?: boolean;
+  /** Whether the seller's number has been fetched fresh for this page. */
+  phoneStatus?: 'loading' | 'ok' | 'failed';
 }
 
 export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
@@ -59,6 +60,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   onToggleStatus,
   viewerPhone,
   viewerShowPhone,
+  phoneStatus = 'ok',
 }) => {
   if (!listing) return null;
 
@@ -466,9 +468,13 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               <h3 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">
                 Description
               </h3>
-              <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">
-                {listing.description}
-              </p>
+              {listing.description?.trim() ? (
+                <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">
+                  {listing.description}
+                </p>
+              ) : (
+                <p className="text-xs text-slate-400 italic">The seller hasn't added a description.</p>
+              )}
             </div>
 
             {/* Seller Information */}
@@ -490,9 +496,6 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                   <div>
                     <div className="flex items-center gap-1.5">
                       <h4 className="font-bold text-sm text-slate-900">{listing.seller_name}</h4>
-                      {listing.seller_verified && (
-                        <ShieldCheck className="w-4 h-4 text-blue-600 fill-blue-500/20" />
-                      )}
                     </div>
                     <div className="flex items-center gap-2 text-[11px] text-slate-500">
                       {listing.seller_rating > 0 ? (
@@ -512,15 +515,21 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
               {/* Phone display trigger */}
               <div className="pt-2.5 border-t border-slate-200 flex items-center justify-between gap-2">
                 <div className="text-xs text-slate-600 min-w-0">
-                  {!rawSellerPhone ? (
+                  {isOwner && sellerHidPhone ? (
                     <span className="text-slate-500">
-                      This seller hasn't shared a number — use chat.
+                      Hidden — buyers cannot see your number.
                     </span>
-                  ) : sellerHidPhone ? (
+                  ) : !isOwner && phoneStatus === 'loading' ? (
+                    <span className="text-slate-400">Checking contact details…</span>
+                  ) : !isOwner && phoneStatus === 'failed' ? (
                     <span className="text-slate-500">
-                      {isOwner
-                        ? 'Hidden — buyers cannot see your number.'
-                        : 'This seller has chosen not to show their number.'}
+                      Couldn't load contact details. You can still use chat.
+                    </span>
+                  ) : !callablePhone && !phoneIsViewersOwn ? (
+                    // The server leaves the number out entirely when the
+                    // seller hid it, so "no number" and "hidden" are the same.
+                    <span className="text-slate-500">
+                      This user has chosen not to show their mobile number.
                     </span>
                   ) : phoneIsViewersOwn ? (
                     <span className="text-amber-700/90">

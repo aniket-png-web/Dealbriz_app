@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PhotoSourcePicker } from './PhotoSourcePicker';
 import { initialsAvatar } from '../utils/imageUtils';
 import { X, User, Phone, MapPin, Loader2, AlertTriangle } from 'lucide-react';
 import { UserProfile } from '../types';
-import { profileApi } from '../services/dealbrizApi';
-import { POPULAR_CITIES } from '../data/initialListings';
+import { profileApi, lookupPincode } from '../services/dealbrizApi';
 
 interface EditProfileModalProps {
   user: UserProfile;
@@ -18,7 +17,23 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ user, onClos
     (user.name || '').split(' ').slice(1).join(' ')
   );
   const [phone, setPhone] = useState(user.phone || '');
+  // The account's city field holds a 6-digit PIN (as the website saves it).
+  // It was a dropdown of city names: a PIN didn't match any option, so it
+  // showed "Select a city", and picking one replaced the PIN with a name.
   const [city, setCity] = useState(user.city || '');
+  const [place, setPlace] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    setPlace('');
+    if (/^\d{6}$/.test(city)) {
+      lookupPincode(city).then((r) => {
+        if (!cancelled && r) setPlace([r.district, r.state].filter(Boolean).join(', '));
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [city]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [avatar, setAvatar] = useState(user.avatar || '');
@@ -41,8 +56,6 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ user, onClos
     }
   };
 
-  const cityOptions = POPULAR_CITIES.filter((c) => c !== 'All Cities');
-
   const handleSave = async () => {
     const trimmedFirst = firstName.trim();
     if (!trimmedFirst) {
@@ -53,6 +66,11 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ user, onClos
     const digits = phone.replace(/\D/g, '');
     if (phone.trim() && (digits.length < 10 || digits.length > 12)) {
       setError('Enter a valid phone number.');
+      return;
+    }
+
+    if (!/^\d{6}$/.test(city.trim())) {
+      setError('Please enter your 6-digit PIN code.');
       return;
     }
 
@@ -165,22 +183,20 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ user, onClos
           </div>
 
           <div>
-            <label className="text-[11px] font-bold text-slate-600 block mb-1.5">City</label>
+            <label className="text-[11px] font-bold text-slate-600 block mb-1.5">PIN Code</label>
             <div className="relative">
               <MapPin className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 z-10" />
-              <select
-                value={cityOptions.includes(city) ? city : ''}
-                onChange={(e) => setCity(e.target.value)}
-                className="w-full appearance-none bg-white border border-slate-200 focus:border-blue-500 rounded-xl pl-9 pr-3 py-2.5 text-xs text-slate-900 outline-none"
-              >
-                <option value="">Select a city</option>
-                {cityOptions.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                value={city}
+                onChange={(e) => setCity(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="e.g. 175001"
+                className="w-full bg-white border border-slate-200 focus:border-blue-500 rounded-xl pl-9 pr-3 py-2.5 text-xs text-slate-900 outline-none font-mono"
+              />
             </div>
+            {place && <p className="text-[10px] text-slate-500 mt-1">{place}</p>}
           </div>
 
           <div>

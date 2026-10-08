@@ -172,7 +172,7 @@ export const PwaInstallModal: React.FC<PwaInstallModalProps> = ({
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-emerald-700 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  Verified Android APK (4,418,612 bytes)
+                  Android APK
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
                   Exact: 4.3 MB

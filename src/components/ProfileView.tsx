@@ -25,6 +25,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { EmiApplication, Listing, UserProfile } from '../types';
+import { EMI_STATUS_LABELS } from '../services/dealbrizApi';
 import { initialsAvatar, defaultListingImage } from '../utils/imageUtils';
 
 interface ProfileViewProps {
@@ -142,7 +143,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               <div className="flex items-center gap-1 mt-0.5">
                 <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0" />
                 <span className="text-xs font-bold text-blue-700">
-                  {user.isVerified ? 'Verified User' : 'DealBriz Member'}
+                  DealBriz Member
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 truncate mt-0.5">{user.email}</p>
@@ -515,13 +516,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </span>
                 <span
                   className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1 ${
-                    app.status === 'approved'
+                    ['approved', 'disbursed', 'completed'].includes(app.status)
                       ? 'bg-emerald-50 text-emerald-700'
-                      : 'bg-amber-50 text-amber-700'
+                      : ['rejected', 'cancelled'].includes(app.status)
+                        ? 'bg-rose-50 text-rose-700'
+                        : 'bg-amber-50 text-amber-700'
                   }`}
                 >
                   <CheckCircle2 className="w-3 h-3" />
-                  {app.status === 'approved' ? 'Approved' : 'Under review'}
+                  {EMI_STATUS_LABELS[app.status] || 'Under review'}
                 </span>
               </div>
 

@@ -43,7 +43,6 @@ import { AuthModal } from './components/AuthModal';
 import { ReportModal } from './components/ReportModal';
 import { CATEGORIES } from './data/initialListings';
 import { dealbrizStorage } from './services/dealbrizStorage';
-import { testFirestoreConnection } from './services/firebase';
 import { oneSignalService, PushChatTarget } from './services/oneSignalService';
 import { syncLiveDealBrizListings } from './services/dealbrizLiveSync';
 import {
@@ -55,7 +54,7 @@ import {
   sendThreadMessage,
   markThreadRead,
 } from './services/chatBridge';
-import { profileApi, notificationsApi, authApi, AuthUser, sellApi, setSessionExpiredHandler, DEALBRIZ_ORIGIN, listingMatchesCity } from './services/dealbrizApi';
+import { profileApi, notificationsApi, authApi, AuthUser, sellApi, emiApi, savedApi, buyApi, setSessionExpiredHandler, DEALBRIZ_ORIGIN, listingMatchesCity } from './services/dealbrizApi';
 import { initAndroidNativeBridge } from './services/capacitorNative';
 import { initialsAvatar, defaultListingImage } from './utils/imageUtils';
 import {
@@ -67,12 +66,35 @@ import {
   Listing,
   UserProfile, ChatMessage } from './types';
 
+/**
+ * "Show my mobile number" lives on the server, so it's the same on every
+ * device and is enforced for listings and chat. The server is the only
+ * source: a value cached on this phone may belong to whoever was signed in
+ * before (shared phone), and copying it onto a new account published that
+ * person's number. An account that has never set it is saved as hidden, so
+ * the switch and what other people see always agree.
+ */
+function reconcileShowPhone(usr: AuthUser): boolean {
+  if (typeof usr.show_phone === 'boolean') {
+    dealbrizStorage.setShowPhone(usr.show_phone);
+    return usr.show_phone;
+  }
+  dealbrizStorage.setShowPhone(false);
+  profileApi.updateProfile({ show_phone: false }).catch(() => {});
+  return false;
+}
+
 export default function App() {
   // Core state
   const [listings, setListings] = useState<Listing[]>(() => dealbrizStorage.getListings());
-  const [savedIds, setSavedIds] = useState<string[]>(() => dealbrizStorage.getSavedIds());
+  // Saved items come from the account (GET /api/saved), so the app and the
+  // website show the same list. They used to live only on this phone.
+  const [savedIds, setSavedIds] = useState<string[]>([]);
+  const [savedProducts, setSavedProducts] = useState<Listing[]>([]);
   const [chats, setChats] = useState<ChatConversation[]>(() => dealbrizStorage.getChats());
-  const [emiApps, setEmiApps] = useState<EmiApplication[]>(() => dealbrizStorage.getEmiApps());
+  // From the server only. The phone-side list held applications that had
+  // never reached the server, shown as if they were under review.
+  const [emiApps, setEmiApps] = useState<EmiApplication[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfile>(() => ({
     ...dealbrizStorage.getUserProfile(),
     showPhone: dealbrizStorage.getShowPhone(),
@@ -104,7 +126,6 @@ export default function App() {
     maxPrice: null,
     condition: null,
     emiOnly: false,
-    verifiedOnly: false,
     sortBy: 'recommended',
   });
 
@@ -153,9 +174,8 @@ export default function App() {
     setShowAuthModal(true);
   };
 
-  // Initialize Firebase connection & OneSignal push
+  // Start OneSignal push
   useEffect(() => {
-    testFirestoreConnection().catch(() => {});
     oneSignalService.initOneSignal().catch(() => {});
   }, []);
 
@@ -195,15 +215,6 @@ export default function App() {
     oneSignalService.linkUser(String(userProfile.id), userProfile.email).catch(() => {});
   }, [userProfile.isAuthenticated, userProfile.id, userProfile.email]);
 
-  // Poll notification summary (Section 3.9: GET /api/notifications/summary)
-  useEffect(() => {
-    const fetchSummary = () => {
-      notificationsApi.getSummary().catch(() => {});
-    };
-    fetchSummary();
-    const interval = setInterval(fetchSummary, 30000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Check auth session (Section 3.1: GET /api/auth/me, then /auth/refresh)
   // Re-copy the cookies when the app is backgrounded, so a token that was
@@ -234,6 +245,7 @@ export default function App() {
       if (usr && usr.email) {
         sessionVerifiedRef.current = true;
         saveSessionCookies().catch(() => {});
+        const showPhone = reconcileShowPhone(usr);
         setUserProfile((prev) => {
           const updated: UserProfile = {
             ...prev,
@@ -243,6 +255,7 @@ export default function App() {
             phone: usr.phone || prev.phone,
             city: usr.city || prev.city,
             avatar: usr.avatar_url || prev.avatar,
+            showPhone,
             isVerified: true,
             isAuthenticated: true,
           };
@@ -422,8 +435,8 @@ export default function App() {
     {
       id: 'notif-welcome',
       title: 'Welcome to DealBriz Android',
-      message: 'Enjoy safe verified local classifieds and seamless seller chats.',
-      time: '1d ago',
+      message: 'Buy and sell near you, and chat with sellers right in the app.',
+      time: '',
       type: 'system' as const,
       read: true,
     },
@@ -523,11 +536,6 @@ export default function App() {
           return false;
         }
 
-        // Verified seller only
-        if (filters.verifiedOnly && !item.seller_verified) {
-          return false;
-        }
-
         // Condition filter
         if (filters.condition && item.condition !== filters.condition) {
           return false;
@@ -579,9 +587,11 @@ export default function App() {
   }, [filteredListings, selectedCity]);
 
   // Saved Listings list
+  // The server's own list of saved listings, so an ad saved from another city
+  // (not in the current feed) still shows. savedIds reflects a tap instantly.
   const savedListings = useMemo(() => {
-    return listings.filter((item) => savedIds.includes(item.id));
-  }, [listings, savedIds]);
+    return savedProducts.filter((item) => savedIds.includes(item.id));
+  }, [savedProducts, savedIds]);
 
   // My Listings list (listings posted by the user)
   // "My Ads" comes from GET /api/my-listings - the server knows what the user
@@ -635,17 +645,26 @@ export default function App() {
     });
   }, []);
 
+  const activeChatIdRef = useRef<string | null>(null);
+  activeChatIdRef.current = activeChat?.id ?? null;
+
   // Load the real inbox for the signed-in user.
-  const refreshInbox = useCallback(async () => {
+  /** Reloads the inbox; returns it, or null if it couldn't be loaded. */
+  const refreshInbox = useCallback(async (): Promise<ChatConversation[] | null> => {
     if (!userProfile.isAuthenticated || !userProfile.id) {
       setChats([]);
-      return;
+      return null;
     }
     try {
-      const inbox = await loadInbox(listings);
-      setChats(inbox);
+      const inbox = await loadInbox(listings, userProfile.id);
+      // The chat on screen is being read right now; its poll marks new
+      // messages read within seconds, so don't flash it as unread meanwhile.
+      const openId = activeChatIdRef.current;
+      setChats(openId ? inbox.map((c) => (c.id === openId ? { ...c, unreadCount: 0 } : c)) : inbox);
+      return inbox;
     } catch {
       // Leave whatever is on screen; the offline banner already explains.
+      return null;
     }
   }, [userProfile.isAuthenticated, userProfile.id, listings]);
 
@@ -658,6 +677,19 @@ export default function App() {
     async (chat: ChatConversation) => {
       const parsed = parseThreadId(chat.id);
       if (!parsed || !userProfile.id) return;
+      // The other person's number comes only from a fresh inbox load. The
+      // copy in the list could be minutes old, and kept offering a call after
+      // they'd hidden their number.
+      setActiveChat((prev) =>
+        prev && prev.id === chat.id ? { ...prev, otherUserPhone: undefined } : prev
+      );
+      refreshInbox().then((inbox) => {
+        const fresh = inbox?.find((c) => c.id === chat.id);
+        if (!fresh) return;
+        setActiveChat((prev) =>
+          prev && prev.id === chat.id ? { ...prev, otherUserPhone: fresh.otherUserPhone } : prev
+        );
+      });
       try {
         const messages = await loadThreadMessages(
           parsed.productId,
@@ -671,7 +703,7 @@ export default function App() {
         // offline
       }
     },
-    [userProfile.id]
+    [userProfile.id, refreshInbox]
   );
 
   /**
@@ -686,10 +718,63 @@ export default function App() {
    * refresh the inbox so the unread badge updates.
    */
   const [pendingPushThread, setPendingPushThread] = useState<PushChatTarget | null>(null);
-  const activeChatIdRef = useRef<string | null>(null);
-  activeChatIdRef.current = activeChat?.id ?? null;
+  const activeChatMessagesRef = useRef<ChatConversation['messages'] | null>(null);
+  activeChatMessagesRef.current = activeChat?.messages ?? null;
   const refreshInboxRef = useRef(refreshInbox);
   refreshInboxRef.current = refreshInbox;
+
+  /**
+   * Keep the inbox and the Chats badge current.
+   *
+   * They were loaded once at launch and then only on pull-to-refresh, so a
+   * new message didn't show until the user did that (only an OPEN chat
+   * polled). Now, while the app is on screen:
+   *  - every 10s, GET /notifications/summary (two COUNTs on the server,
+   *    built for polling); when the unread-message count changes, reload
+   *    the inbox;
+   *  - every 60s, reload the inbox anyway, in case a message arrived and
+   *    another was read in the same interval, leaving the count unchanged;
+   *  - on returning to the app, reload at once (Android pauses timers in
+   *    the background).
+   * Nothing runs while signed out, or while the app is in the background.
+   */
+  const lastUnreadChatsRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!sessionResolved || !userProfile.isAuthenticated || !userProfile.id) {
+      lastUnreadChatsRef.current = null;
+      return;
+    }
+    let stopped = false;
+    let ticks = 0;
+    const check = async () => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      ticks += 1;
+      const summary = await notificationsApi.getSummary();
+      if (stopped || !summary) return;
+      const changed =
+        lastUnreadChatsRef.current !== null && summary.chats !== lastUnreadChatsRef.current;
+      lastUnreadChatsRef.current = summary.chats;
+      if (changed || ticks % 6 === 0) refreshInboxRef.current().catch(() => {});
+    };
+    check();
+    const interval = window.setInterval(check, 10000);
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      refreshInboxRef.current().catch(() => {});
+      check();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [sessionResolved, userProfile.isAuthenticated, userProfile.id]);
+
+  // Opening the Chats tab shows the current inbox, not the one from launch.
+  useEffect(() => {
+    if (activeTab === 'chats' && sessionResolved) refreshInboxRef.current().catch(() => {});
+  }, [activeTab, sessionResolved]);
 
   useEffect(() => {
     oneSignalService.setChatOpenHandler((t) => setPendingPushThread(t));
@@ -718,7 +803,7 @@ export default function App() {
       if (!chat) {
         // A brand-new conversation won't be in the inbox we already have.
         try {
-          const inbox = await loadInbox(listings);
+          const inbox = await loadInbox(listings, userProfile.id);
           setChats(inbox);
           chat = inbox.find((c) => c.id === id);
         } catch {
@@ -748,6 +833,14 @@ export default function App() {
           parsed.otherUserId,
           userProfile.id!
         );
+        // A message that arrives while this thread is on screen has been
+        // seen. Without this it stayed unread on the server, so the dot came
+        // back on the inbox as soon as the chat was closed.
+        const known = new Set((activeChatMessagesRef.current || []).map((m) => m.id));
+        if (messages.some((m) => m.sender === 'seller' && !known.has(m.id))) {
+          markThreadRead(parsed.productId, parsed.otherUserId).catch(() => {});
+          setChats((prev) => prev.map((c) => (c.id === threadKey ? { ...c, unreadCount: 0 } : c)));
+        }
         setActiveChat((prev) => {
           if (!prev || prev.id !== threadKey) return prev;
           // Don't clobber an optimistic bubble that hasn't come back yet.
@@ -765,10 +858,35 @@ export default function App() {
   }, [activeChat?.id, userProfile.id]);
 
   // Handlers
-  const handleToggleSave = (id: string, e: React.MouseEvent) => {
+  const handleToggleSave = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const updated = dealbrizStorage.toggleSaveId(id);
-    setSavedIds(updated);
+    // Saves belong to an account, as on the website.
+    if (!userProfile.isAuthenticated || !userProfile.id) {
+      setToast('Sign in to save items to your account.');
+      handleOpenAuth('login');
+      return;
+    }
+    const wasSaved = savedIds.includes(id);
+    // Flip at once so the heart responds; undo if the server says no.
+    setSavedIds((prev) => (wasSaved ? prev.filter((x) => x !== id) : [...prev, id]));
+    if (!wasSaved) {
+      const known = listings.find((l) => l.id === id) || myListings.find((l) => l.id === id);
+      if (known) setSavedProducts((prev) => [known, ...prev.filter((p) => p.id !== id)]);
+    }
+    try {
+      if (wasSaved) await savedApi.unsave(id);
+      else await savedApi.save(id);
+      refreshSaved().catch(() => {});
+    } catch (err: any) {
+      setSavedIds((prev) => (wasSaved ? [...prev, id] : prev.filter((x) => x !== id)));
+      setToast(
+        err?.status === 0
+          ? "Couldn't reach DealBriz. Check your connection and try again."
+          : wasSaved
+            ? "Couldn't remove this item. Please try again."
+            : "Couldn't save this item. Please try again."
+      );
+    }
   };
 
   const handleCityChange = (city: string) => {
@@ -901,42 +1019,86 @@ export default function App() {
     setShowEmiModal(true);
   };
 
-  const handlePostListing = async (newListing: Listing) => {
+  /** Turns a failed save into the message the Sell form shows. */
+  const saveErrorMessage = (err: any, editing: boolean) =>
+    err?.status === 0
+      ? `Your ad wasn't ${editing ? 'saved' : 'posted'} - no connection to DealBriz. Your details are still here; try again when you're online.`
+      : err?.data?.error || err?.message || `Your ad wasn't ${editing ? 'saved' : 'posted'}. Please try again.`;
+
+  /**
+   * Resolves once the server has the ad; throws (with a message for the
+   * form) if it doesn't. The Sell form stays open until then - it used to
+   * close before the request, so a failed post lost everything typed.
+   */
+  const handlePostListing = async (newListing: Listing): Promise<void> => {
     if (!userProfile.isAuthenticated) {
       setShowSellModal(false);
       setChatBlockedReason('signin');
       return;
     }
 
-    setShowSellModal(false);
-    setEditingListing(null);
+    // An edit carries the listing's real id, so it goes to
+    // PUT /api/my-listings/<id>; only a new ad goes to POST /api/sell.
+    const isExisting =
+      Boolean(newListing.id) &&
+      !newListing.id.startsWith('local-') &&
+      myListings.some((m) => m.id === newListing.id);
 
+    let saved: Listing;
     try {
-      // An edit carries the listing's real id, so it goes to
-      // PUT /api/my-listings/<id>. sellApi.createListing was being called for
-      // both paths, which is why saving an edit posted a duplicate ad.
-      const isExisting =
-        Boolean(newListing.id) &&
-        !newListing.id.startsWith('local-') &&
-        myListings.some((m) => m.id === newListing.id);
-
-      const saved = isExisting
+      saved = isExisting
         ? await sellApi.updateListing(newListing.id, newListing)
         : await sellApi.createListing(newListing);
-      const merged = [saved, ...listings.filter((l) => l.id !== newListing.id)];
-      setListings(merged);
-      dealbrizStorage.saveListings(merged);
-      setActiveListing(saved);
-      loadLiveListings().catch(() => {});
-      refreshMyListings().catch(() => {});
     } catch (err: any) {
-      setToast(
-        err?.status === 0
-          ? "Your ad wasn't posted — no connection to DealBriz. Try again when you're online."
-          : err?.data?.error || err?.message || "Your ad wasn't posted. Please try again."
-      );
+      throw new Error(saveErrorMessage(err, isExisting));
     }
+
+    setShowSellModal(false);
+    setEditingListing(null);
+    const merged = [saved, ...listings.filter((l) => l.id !== newListing.id)];
+    setListings(merged);
+    dealbrizStorage.saveListings(merged);
+    setActiveListing(saved);
+    loadLiveListings().catch(() => {});
+    refreshMyListings().catch(() => {});
   };
+
+  /**
+   * The seller's number on the listing page comes only from a fresh
+   * GET /api/buy/<id> made when the page opens. The listing list (in memory
+   * and cached on the phone) carries no numbers, so a number the seller has
+   * since hidden can't be shown from an old copy.
+   */
+  const [phoneCheck, setPhoneCheck] = useState<{
+    id: string;
+    status: 'loading' | 'ok' | 'failed';
+    phone: string;
+  } | null>(null);
+  useEffect(() => {
+    const id = activeListing?.id;
+    if (!id || id.startsWith('local-')) {
+      setPhoneCheck(null);
+      return;
+    }
+    let cancelled = false;
+    setPhoneCheck({ id, status: 'loading', phone: '' });
+    buyApi
+      .getListing(id)
+      .then((fresh) => {
+        if (cancelled) return;
+        setPhoneCheck({ id, status: 'ok', phone: fresh.show_phone ? fresh.seller_phone || '' : '' });
+        // Price, status and the rest may have changed too.
+        setActiveListing((prev) =>
+          prev && prev.id === id ? { ...prev, ...fresh, seller_phone: '' } : prev
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setPhoneCheck({ id, status: 'failed', phone: '' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeListing?.id]);
 
   const handleOpenEditModal = (listing: Listing) => {
     // Second gate behind the hidden button: never open the editor for an ad
@@ -955,7 +1117,7 @@ export default function App() {
     setEditingListing(null);
   };
 
-  const handleUpdateListing = async (updatedListing: Listing) => {
+  const handleUpdateListing = async (updatedListing: Listing): Promise<void> => {
     if (!myListings.some((m) => m.id === updatedListing.id)) {
       setShowSellModal(false);
       setEditingListing(null);
@@ -963,25 +1125,23 @@ export default function App() {
       return;
     }
 
+    let saved: Listing;
+    try {
+      saved = await sellApi.updateListing(updatedListing.id, updatedListing);
+    } catch (err: any) {
+      // Form stays open with the seller's changes.
+      throw new Error(saveErrorMessage(err, true));
+    }
+
     setShowSellModal(false);
     setEditingListing(null);
-
-    try {
-      const saved = await sellApi.updateListing(updatedListing.id, updatedListing);
-      const merged = listings.map((l) => (l.id === saved.id ? saved : l));
-      setListings(merged);
-      dealbrizStorage.saveListings(merged);
-      if (activeListing && activeListing.id === saved.id) {
-        setActiveListing(saved);
-      }
-      refreshMyListings().catch(() => {});
-    } catch (err: any) {
-      setToast(
-        err?.status === 0
-          ? "Changes not saved — no connection to DealBriz."
-          : err?.data?.error || 'Could not save your changes. Please try again.'
-      );
+    const merged = listings.map((l) => (l.id === saved.id ? saved : l));
+    setListings(merged);
+    dealbrizStorage.saveListings(merged);
+    if (activeListing && activeListing.id === saved.id) {
+      setActiveListing(saved);
     }
+    refreshMyListings().catch(() => {});
   };
 
   const handleDeleteListing = async (id: string) => {
@@ -1031,9 +1191,55 @@ export default function App() {
     handleToggleListingStatus(id);
   };
 
+  const refreshSaved = useCallback(async () => {
+    if (!userProfile.isAuthenticated || !userProfile.id) {
+      setSavedIds([]);
+      setSavedProducts([]);
+      return;
+    }
+    try {
+      // Saves made in the app before this update exist only on this phone.
+      // Move them to the account once, then forget the phone copy.
+      const legacy = dealbrizStorage.getSavedIds().filter((id) => id && !id.startsWith('local-'));
+      if (legacy.length) {
+        await Promise.all(legacy.map((id) => savedApi.save(id).catch(() => {})));
+        dealbrizStorage.clearLegacySavedIds();
+      }
+      const list = await savedApi.getSaved();
+      setSavedProducts(list);
+      setSavedIds(list.map((l) => l.id));
+    } catch {
+      // Offline: keep what's shown.
+    }
+  }, [userProfile.isAuthenticated, userProfile.id]);
+
+  useEffect(() => {
+    if (!sessionResolved) return;
+    refreshSaved();
+  }, [refreshSaved, sessionResolved]);
+
+  const refreshEmiApps = useCallback(async () => {
+    if (!userProfile.isAuthenticated || !userProfile.id) {
+      setEmiApps([]);
+      return;
+    }
+    try {
+      setEmiApps(await emiApi.getMyApplications());
+    } catch {
+      // Keep what's on screen; nothing is invented while offline.
+    }
+  }, [userProfile.isAuthenticated, userProfile.id]);
+
+  useEffect(() => {
+    if (!sessionResolved) return;
+    refreshEmiApps();
+  }, [refreshEmiApps, sessionResolved]);
+
   const handleEmiApplicationSubmit = (app: EmiApplication) => {
-    const updated = dealbrizStorage.addEmiApp(app);
-    setEmiApps(updated);
+    // Called only after the server accepted it; show it at once, then
+    // replace with the server's list.
+    setEmiApps((prev) => [app, ...prev.filter((a) => a.id !== app.id)]);
+    refreshEmiApps();
   };
 
   const handleMakeOfferFromDetail = (listing: Listing, offerPrice: number) => {
@@ -1240,8 +1446,7 @@ export default function App() {
           {(selectedCategory !== 'all' ||
             selectedCity !== 'All Cities' ||
             filters.searchQuery ||
-            filters.emiOnly ||
-            filters.verifiedOnly) && (
+            filters.emiOnly) && (
             <div className="px-3.5 py-1.5 flex items-center gap-1.5 overflow-x-auto no-scrollbar text-xs">
               <span className="text-[11px] text-slate-500 font-semibold">Active:</span>
 
@@ -1275,12 +1480,6 @@ export default function App() {
                 </span>
               )}
 
-              {filters.verifiedOnly && (
-                <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full text-[11px] font-medium">
-                  Verified Only
-                </span>
-              )}
-
               <button
                 onClick={() => {
                   setSelectedCategory('all');
@@ -1289,7 +1488,6 @@ export default function App() {
                     ...filters,
                     searchQuery: '',
                     emiOnly: false,
-                    verifiedOnly: false,
                     condition: null,
                   });
                 }}
@@ -1306,10 +1504,21 @@ export default function App() {
               <div className="flex items-center gap-2.5 p-3 rounded-2xl bg-amber-500/10 border border-amber-200">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <p className="text-[11px] font-bold text-amber-700">Showing saved listings</p>
-                  <p className="text-[10px] text-amber-700/70 leading-tight">
-                    Couldn't reach DealBriz. Prices and availability may be out of date.
-                  </p>
+                  {listings.length > 0 ? (
+                    <>
+                      <p className="text-[11px] font-bold text-amber-700">Showing saved listings</p>
+                      <p className="text-[10px] text-amber-700/70 leading-tight">
+                        Couldn't reach DealBriz. Prices and availability may be out of date.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-[11px] font-bold text-amber-700">Couldn't load listings</p>
+                      <p className="text-[10px] text-amber-700/70 leading-tight">
+                        Check your internet connection and tap Retry.
+                      </p>
+                    </>
+                  )}
                 </div>
                 <button
                   onClick={() => {
@@ -1363,6 +1572,16 @@ export default function App() {
                   />
                 ))}
               </div>
+            ) : filteredListings.length === 0 && isOffline && listings.length === 0 ? (
+              // Nothing to show yet because the server hasn't answered - not
+              // "no results", so don't suggest changing filters.
+              <div className="text-center py-12 px-4 bg-white rounded-3xl border border-slate-200 my-4 space-y-2">
+                <AlertCircle className="w-10 h-10 text-slate-400 mx-auto" />
+                <h4 className="font-bold text-slate-900 text-sm">No connection to DealBriz</h4>
+                <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                  Listings will appear here once you're back online.
+                </p>
+              </div>
             ) : filteredListings.length === 0 ? (
               <div className="text-center py-12 px-4 bg-white rounded-3xl border border-slate-200 my-4 space-y-3">
                 <AlertCircle className="w-10 h-10 text-slate-500 mx-auto" />
@@ -1382,7 +1601,6 @@ export default function App() {
                       maxPrice: null,
                       condition: null,
                       emiOnly: false,
-                      verifiedOnly: false,
                       sortBy: 'recommended',
                     });
                   }}
@@ -1425,9 +1643,9 @@ export default function App() {
                 <ShieldCheck className="w-6 h-6" />
               </div>
               <div className="text-xs">
-                <h5 className="font-bold text-slate-900">DealBriz Verified Shield</h5>
+                <h5 className="font-bold text-slate-900">Trade safely</h5>
                 <p className="text-slate-500 text-[11px] leading-tight mt-0.5">
-                  Direct buyer-to-seller chats, verified phone numbers, and safe community transactions.
+                  Chat in the app, meet in a public place, inspect before you pay, and never pay in advance.
                 </p>
               </div>
             </div>
@@ -1446,7 +1664,7 @@ export default function App() {
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-base font-extrabold text-slate-900">All Categories</h3>
-              <p className="text-xs text-slate-500">Browse verified listings by category</p>
+              <p className="text-xs text-slate-500">Browse listings by category</p>
             </div>
             <button
               onClick={() => handleSelectCategory('all')}
@@ -1689,12 +1907,23 @@ export default function App() {
       {!showSearchResults && activeTab === 'profile' && (
         <ProfileView
           showPhone={Boolean(userProfile.showPhone)}
-          onToggleShowPhone={(on) => {
+          onToggleShowPhone={async (on) => {
+            const before = Boolean(userProfile.showPhone);
             setUserProfile((prev) => ({ ...prev, showPhone: on }));
-            dealbrizStorage.setShowPhone(on);
-            // Sent so the website and app agree once the column exists.
-            profileApi.updateProfile({ show_phone: on }).catch(() => {});
-            setToast(on ? 'Your number is now visible to buyers.' : 'Your number is now hidden.');
+            try {
+              // The server applies this to every one of the user's listings
+              // and to chat. If it fails, the switch must not claim otherwise.
+              await profileApi.updateProfile({ show_phone: on });
+              dealbrizStorage.setShowPhone(on);
+              setToast(
+                on
+                  ? 'Your number is now visible on your ads and in chat.'
+                  : 'Your number is now hidden from everyone.'
+              );
+            } catch {
+              setUserProfile((prev) => ({ ...prev, showPhone: before }));
+              setToast("Couldn't update this setting. Check your connection and try again.");
+            }
           }}
           onOpenEmi={() => {
             setEmiListingContext(null);
@@ -1732,6 +1961,9 @@ export default function App() {
             await authApi.logout();
             clearSessionCookies();
             sessionVerifiedRef.current = false;
+            // Per-account settings must not carry over to the next person
+            // who signs in on this phone.
+            dealbrizStorage.setShowPhone(false);
             const guestUser: UserProfile = {
               id: 'guest',
               name: 'Guest User',
@@ -1776,7 +2008,14 @@ export default function App() {
       {/* 1. Listing Detail Modal */}
       {activeListing && (
         <ListingDetailModal
-          listing={activeListing}
+          listing={{
+            ...activeListing,
+            seller_phone:
+              phoneCheck?.id === activeListing.id && phoneCheck.status === 'ok' ? phoneCheck.phone : '',
+          }}
+          phoneStatus={
+            phoneCheck?.id === activeListing.id ? phoneCheck.status : 'loading'
+          }
           onClose={() => setActiveListing(null)}
           isSaved={savedIds.includes(activeListing.id)}
           onToggleSave={handleToggleSave}
@@ -1796,7 +2035,10 @@ export default function App() {
         <ChatModal
           conversation={activeChat}
           listing={chatListingContext}
-          onClose={() => setActiveChat(null)}
+          onClose={() => {
+            setActiveChat(null);
+            refreshInbox().catch(() => {});
+          }}
           onSendMessage={handleSendMessage}
           onViewListing={(listingId) => {
             const found = listings.find((l) => l.id === listingId);
@@ -1919,7 +2161,6 @@ export default function App() {
               maxPrice: null,
               condition: null,
               emiOnly: false,
-              verifiedOnly: false,
               sortBy: 'recommended',
             });
           }}
@@ -1989,6 +2230,7 @@ export default function App() {
           onSuccess={(usr: AuthUser) => {
             sessionVerifiedRef.current = true;
             saveSessionCookies().catch(() => {});
+            const showPhone = reconcileShowPhone(usr);
             setUserProfile((prev) => {
               const updated: UserProfile = {
                 ...prev,
@@ -1998,6 +2240,7 @@ export default function App() {
                 phone: usr.phone || prev.phone,
                 city: usr.city || prev.city,
                 avatar: usr.avatar_url || prev.avatar,
+                showPhone,
                 isVerified: true,
                 isAuthenticated: true,
               };

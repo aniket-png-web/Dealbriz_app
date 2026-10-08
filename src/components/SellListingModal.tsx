@@ -1,5 +1,5 @@
 import { PhotoSourcePicker } from './PhotoSourcePicker';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Camera,
@@ -24,8 +24,9 @@ import { initialsAvatar, defaultListingImage } from '../utils/imageUtils';
 
 interface SellListingModalProps {
   onClose: () => void;
-  onPostListing: (listing: Listing) => void;
-  onUpdateListing?: (listing: Listing) => void;
+  /** Resolve when the server has the ad; reject with a message to show. */
+  onPostListing: (listing: Listing) => Promise<void>;
+  onUpdateListing?: (listing: Listing) => Promise<void>;
   editingListing?: Listing | null;
   userCity: string;
 }
@@ -51,13 +52,19 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
     editingListing?.condition || 'like_new'
   );
   const [description, setDescription] = useState(editingListing?.description || '');
-  const [location, setLocation] = useState(
-    editingListing?.location || (userCity === 'All Cities' ? 'Sector 17, Chandigarh' : `${userCity}, India`)
-  );
-  const [city, setCity] = useState(
-    editingListing?.city || (userCity === 'All Cities' ? 'Chandigarh' : userCity)
-  );
-  const [pincode, setPincode] = useState(editingListing?.pincode || '160017');
+  // A new ad starts at the seller's own PIN code. It used to start at
+  // 160017 / "Sector 17, Chandigarh", and that address was posted whenever
+  // the PIN lookup didn't overwrite it.
+  const ownPin = (() => {
+    const prof = dealbrizStorage.getUserProfile();
+    return [prof.pincode, prof.city].find((v) => /^\d{6}$/.test((v || '').trim()))?.trim() || '';
+  })();
+  const [location, setLocation] = useState(editingListing?.location || '');
+  // True once the seller types in the Location box. Until then the location
+  // follows the PIN code, so changing the PIN can't leave an old address.
+  const [locationTouched, setLocationTouched] = useState(false);
+  const [city, setCity] = useState(editingListing?.city || '');
+  const [pincode, setPincode] = useState(editingListing?.pincode || ownPin);
   const [negotiable, setNegotiable] = useState(editingListing ? (editingListing.negotiable ?? true) : true);
   const [emiEligible, setEmiEligible] = useState(editingListing ? (editingListing.emi_eligible ?? true) : true);
   const [status, setStatus] = useState<'active' | 'sold'>(editingListing?.status || 'active');
@@ -92,6 +99,8 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [showDescPrompt, setShowDescPrompt] = useState(false);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
 
   // Sync if editingListing prop updates
   useEffect(() => {
@@ -103,7 +112,8 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
       setCondition(editingListing.condition || 'like_new');
       setDescription(editingListing.description || '');
       setLocation(editingListing.location || '');
-      setCity(editingListing.city || (userCity === 'All Cities' ? 'Chandigarh' : userCity));
+      setLocationTouched(false);
+      setCity(editingListing.city || '');
       setPincode(editingListing.pincode || '');
       setNegotiable(editingListing.negotiable ?? true);
       setEmiEligible(editingListing.emi_eligible ?? true);
@@ -129,29 +139,42 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
   const [pincodeResult, setPincodeResult] = useState<PincodeLookupResult | null>(null);
   const [pincodeLoading, setPincodeLoading] = useState(false);
 
-  // Auto lookup when pincode changes
-  const handlePincodeChange = async (val: string) => {
-    setPincode(val);
-    const clean = val.replace(/\D/g, '');
-    if (clean.length === 6) {
-      setPincodeLoading(true);
-      const res = await lookupPincode(clean);
-      setPincodeLoading(false);
-      if (res) {
-        setPincodeResult(res);
-        if (res.district && city === 'Chandigarh') {
-          setCity(res.district);
-        }
-        if (!location || location === 'Sector 17, Chandigarh') {
-          setLocation(`${res.name}, ${res.district}`);
-        }
-      } else {
-        setPincodeResult(null);
-      }
-    } else {
-      setPincodeResult(null);
-    }
+  const [pincodeChecked, setPincodeChecked] = useState(false);
+
+  const resolvePincode = async (clean: string) => {
+    setPincodeLoading(true);
+    const res = await lookupPincode(clean);
+    setPincodeLoading(false);
+    setPincodeChecked(true);
+    setPincodeResult(res);
+    if (res?.district) setCity(res.district);
+    return res;
   };
+
+  // Look up the PIN the form opens with, so the seller sees where the ad
+  // will be shown before posting.
+  useEffect(() => {
+    const clean = pincode.replace(/\D/g, '');
+    if (clean.length === 6) resolvePincode(clean);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handlePincodeChange = async (val: string) => {
+    const clean = val.replace(/\D/g, '').slice(0, 6);
+    setPincode(clean);
+    setPincodeResult(null);
+    setPincodeChecked(false);
+    // A new PIN makes an address that came with the old one wrong. Unless the
+    // seller typed their own, clear it; the server then names the location
+    // from the PIN code (district, state).
+    if (!locationTouched) setLocation('');
+    if (clean.length === 6) await resolvePincode(clean);
+  };
+
+  /** What the ad will show as its location if the seller leaves the box empty. */
+  const derivedLocation = pincodeResult
+    ? [pincodeResult.district, pincodeResult.state].filter(Boolean).join(', ')
+    : '';
 
   // Section 3.3: POST /api/sell/upload-image
   const isVehicle = category === 'cars' || category === 'bikes';
@@ -210,7 +233,7 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
     setImages(images.filter((_, i) => i !== index));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     // A second tap before the modal closes would fire a second request.
     if (submitting) return;
@@ -238,6 +261,14 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
       setFormError('Please add at least one photo — ads with photos get far more responses.');
       return;
     }
+    // Required, as on the website. A blank one used to be replaced with
+    // "Well maintained item available for quick local pickup." and shown as
+    // if the seller had written it.
+    if (!description.trim()) {
+      setFormError(null);
+      setShowDescPrompt(true);
+      return;
+    }
     setFormError(null);
 
     if (isEditing && editingListing) {
@@ -248,10 +279,10 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
         original_price: originalPrice ? Number(originalPrice) : null,
         category,
         condition,
-        description: description.trim() || 'Well maintained item available for quick local pickup.',
-        location:
-          location.trim() ||
-          (pincodeResult ? `${pincodeResult.district}, ${pincodeResult.state}` : city),
+        description: description.trim(),
+        // Empty means "work it out from the PIN code" - the server does that
+        // with the same data the lookup above uses.
+        location: location.trim() || derivedLocation,
         city,
         pincode: pincode.trim(),
         image_url:
@@ -268,20 +299,19 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
         },
       };
 
-      if (onUpdateListing) {
-        onUpdateListing(updatedListing);
-      } else {
-        onPostListing(updatedListing);
-      }
-
+      setSubmitting(true);
       try {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.5 },
-        });
-      } catch {
-        // ignore
+        await (onUpdateListing ? onUpdateListing(updatedListing) : onPostListing(updatedListing));
+        try {
+          confetti({ particleCount: 50, spread: 60, origin: { y: 0.5 } });
+        } catch {
+          // ignore
+        }
+      } catch (err: any) {
+        // Everything typed is still in the form.
+        setFormError(err?.message || 'Your changes were not saved. Please try again.');
+      } finally {
+        setSubmitting(false);
       }
       return;
     }
@@ -300,10 +330,8 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
       original_price: originalPrice ? Number(originalPrice) : null,
       category,
       condition,
-      description: description.trim() || 'Well maintained item available for quick local pickup.',
-      location:
-        location.trim() ||
-        (pincodeResult ? `${pincodeResult.district}, ${pincodeResult.state}` : city),
+      description: description.trim(),
+      location: location.trim() || derivedLocation,
       city,
       pincode: pincode.trim(),
       distance_km: undefined,
@@ -319,7 +347,8 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
       seller_avatar: profile.avatar || initialsAvatar(profile.name || 'Seller'),
       seller_rating: 0,
       seller_reviews_count: 0,
-      seller_verified: Boolean(profile.isVerified),
+      // DealBriz doesn't verify sellers; this only becomes true if the API says so.
+      seller_verified: false,
       seller_joined: profile.memberSince || '',
       views: 0,
       created_at: editingListing?.created_at || new Date().toISOString(),
@@ -329,16 +358,18 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
     };
 
     setSubmitting(true);
-    onPostListing(newListing);
-
     try {
-      confetti({
-        particleCount: 90,
-        spread: 80,
-        origin: { y: 0.5 },
-      });
-    } catch {
-      // ignore
+      await onPostListing(newListing);
+      try {
+        confetti({ particleCount: 90, spread: 80, origin: { y: 0.5 } });
+      } catch {
+        // ignore
+      }
+    } catch (err: any) {
+      // The form stays open with everything the seller entered.
+      setFormError(err?.message || "Your ad wasn't posted. Please try again.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -778,22 +809,31 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
               </div>
 
               <div>
-                <label className="text-xs font-bold text-slate-600 block mb-1">City</label>
+                <label className="text-xs font-bold text-slate-600 block mb-1">District</label>
+                {/* Comes from the PIN code. It was a free-text box that was
+                    never saved, and a typo in it could become the ad's location. */}
                 <input
                   type="text"
-                  value={city}
-                  onChange={(e) => setCity(e.target.value)}
-                  className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900"
+                  readOnly
+                  value={pincodeResult?.district || ''}
+                  placeholder="From PIN code"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700"
                 />
               </div>
             </div>
 
-            {/* India Post Pincode Lookup Result Live Confirmation */}
+            {pincodeChecked && !pincodeResult && !pincodeLoading && (
+              <div className="p-2 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-800 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                <span>We couldn't find this PIN code. Please check it.</span>
+              </div>
+            )}
+
             {pincodeResult && (
               <div className="p-2 rounded-xl bg-emerald-500/15 border border-emerald-200 text-[11px] text-emerald-700 flex items-center gap-1.5 animate-in fade-in">
                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600" />
                 <span className="truncate">
-                  Verified: <strong>{pincodeResult.name}</strong>, {pincodeResult.district}, {pincodeResult.state}
+                  PIN {pincodeResult.pincode}: <strong>{pincodeResult.district}</strong>, {pincodeResult.state}
                 </span>
               </div>
             )}
@@ -803,8 +843,15 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
               <input
                 type="text"
                 value={location}
-                onChange={(e) => setLocation(e.target.value)}
-                placeholder="e.g. Sector 55, Near Phase 5 Market"
+                onChange={(e) => {
+                  setLocation(e.target.value);
+                  setLocationTouched(true);
+                }}
+                placeholder={
+                  derivedLocation
+                    ? `Leave blank to show "${derivedLocation}"`
+                    : 'e.g. Sector 55, Near Phase 5 Market'
+                }
                 className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900"
               />
             </div>
@@ -812,8 +859,11 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
 
           {/* Description */}
           <div>
-            <label className="text-xs font-bold text-slate-600 block mb-1">Description</label>
+            <label className="text-xs font-bold text-slate-600 block mb-1">
+              Description <span className="text-rose-600">*</span>
+            </label>
             <textarea
+              ref={descriptionRef}
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -842,9 +892,15 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
             )}
             <button
               type="submit"
-              className="flex-1 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-extrabold py-3.5 px-4 rounded-xl shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 active:scale-98 transition-all"
+              disabled={submitting || isUploading}
+              className="flex-1 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-extrabold py-3.5 px-4 rounded-xl shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 active:scale-98 transition-all disabled:opacity-70"
             >
-              {isEditing ? (
+              {submitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>{isEditing ? 'Saving…' : 'Publishing…'}</span>
+                </>
+              ) : isEditing ? (
                 <>
                   <Check className="w-4 h-4 text-emerald-700" />
                   <span>Save Changes</span>
@@ -858,7 +914,46 @@ export const SellListingModal: React.FC<SellListingModalProps> = ({
             </button>
           </div>
         </form>
+
       </div>
+
+        {showDescPrompt && (
+          <div
+            className="absolute inset-0 z-[120] bg-black/40 flex items-center justify-center p-6"
+            onClick={() => setShowDescPrompt(false)}
+          >
+            <div
+              role="alertdialog"
+              aria-labelledby="desc-prompt-title"
+              className="w-full max-w-xs bg-white rounded-2xl p-4 shadow-2xl text-center space-y-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-10 h-10 mx-auto rounded-full bg-amber-50 border border-amber-200 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+              </div>
+              <h4 id="desc-prompt-title" className="text-sm font-extrabold text-slate-900">
+                Add a description
+              </h4>
+              <p className="text-[11px] text-slate-600 leading-snug">
+                Tell buyers about the item's condition, age and why you're selling. An ad can't be
+                posted without one.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDescPrompt(false);
+                  setTimeout(() => {
+                    descriptionRef.current?.scrollIntoView({ block: 'center' });
+                    descriptionRef.current?.focus();
+                  }, 50);
+                }}
+                className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-xs font-bold"
+              >
+                Add description
+              </button>
+            </div>
+          </div>
+        )}
     </div>
   );
 };

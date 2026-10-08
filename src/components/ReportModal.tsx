@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, ShieldAlert, CheckCircle2, AlertTriangle, Send } from 'lucide-react';
 import { reportsApi, ReportReason } from '../services/dealbrizApi';
 import { Listing } from '../types';
+import { dealbrizStorage } from '../services/dealbrizStorage';
 
 interface ReportModalProps {
   listing?: Listing | null;
@@ -12,9 +13,14 @@ export const ReportModal: React.FC<ReportModalProps> = ({ listing, onClose }) =>
   const [reasons, setReasons] = useState<ReportReason[]>([]);
   const [selectedReason, setSelectedReason] = useState('');
   const [notes, setNotes] = useState('');
-  const [email, setEmail] = useState('user@dealbriz.com');
+  // Was hardcoded to 'user@dealbriz.com' and sent as the reporter's email.
+  const [email, setEmail] = useState('');
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const signedIn = Boolean(dealbrizStorage.getUserProfile().isAuthenticated);
+  // Reports point at the seller's account; the listing must carry it.
+  const sellerId = listing?.seller_id ? String(listing.seller_id) : '';
 
   useEffect(() => {
     if (listing) {
@@ -32,29 +38,48 @@ export const ReportModal: React.FC<ReportModalProps> = ({ listing, onClose }) =>
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
+    if (loading) return;
+    setError(null);
 
+    if (listing && !signedIn) {
+      setError('Please sign in to report a seller.');
+      return;
+    }
+    if (listing && !sellerId) {
+      setError("This ad can't be reported right now. Please refresh and try again.");
+      return;
+    }
+    if (!listing && !signedIn && !email.includes('@')) {
+      setError('Please enter your email so we can reply.');
+      return;
+    }
+
+    setLoading(true);
     try {
       if (listing) {
-        // Section 3.10: POST /api/reports
         await reportsApi.submitReport({
+          reported_user_id: sellerId,
           product_id: listing.id,
-          user_id: listing.seller_name,
           reason: selectedReason,
-          notes: notes.trim(),
+          details: notes.trim(),
         });
       } else {
-        // Section 3.10: POST /api/reports/problem
         await reportsApi.submitProblem({
-          email,
           reason: selectedReason,
-          description: notes.trim(),
+          details: notes.trim(),
+          ...(signedIn ? {} : { contact_email: email.trim() }),
         });
       }
+      // Only after the server accepted it.
       setSubmitted(true);
-    } catch {
-      // Graceful success simulation
-      setSubmitted(true);
+    } catch (err: any) {
+      setError(
+        err?.status === 0
+          ? "Couldn't reach DealBriz. Check your connection and try again."
+          : err?.status === 401
+            ? 'Please sign in again to send this report.'
+            : err?.data?.error || err?.message || 'Your report was not sent. Please try again.'
+      );
     } finally {
       setLoading(false);
     }
@@ -116,6 +141,29 @@ export const ReportModal: React.FC<ReportModalProps> = ({ listing, onClose }) =>
               />
             </div>
 
+            {!listing && !signedIn && (
+              <div>
+                <label className="text-[11px] font-bold text-slate-600 block mb-1">
+                  Your Email (so we can reply)
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            )}
+
+            {error && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-px" />
+                <span>{error}</span>
+              </div>
+            )}
+
             <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
@@ -127,7 +175,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({ listing, onClose }) =>
               <button
                 type="submit"
                 disabled={loading}
-                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold shadow-md shadow-rose-600/30"
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold shadow-md shadow-rose-600/30 disabled:opacity-60"
               >
                 {loading ? 'Submitting...' : 'Submit Report'}
               </button>

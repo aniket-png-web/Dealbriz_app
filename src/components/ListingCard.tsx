@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Heart, MapPin, ShieldCheck, Zap, Eye, Sparkles } from 'lucide-react';
+import { Heart, MapPin, Zap, Eye, Sparkles } from 'lucide-react';
 import { Listing } from '../types';
 import { getCategoryEmoji, initialsAvatar } from '../utils/imageUtils';
 
@@ -62,7 +62,6 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             <span className="text-[11px] font-bold text-slate-600 capitalize">
               {listing.category}
             </span>
-            <span className="text-[9px] text-slate-500 font-medium">DealBriz Verified</span>
           </div>
         )}
 
@@ -155,9 +154,6 @@ export const ListingCard: React.FC<ListingCardProps> = ({
             <span className="text-[10px] font-medium text-slate-600 truncate max-w-[70px]">
               {listing.seller_name.split(' ')[0]}
             </span>
-            {listing.seller_verified && (
-              <ShieldCheck className="w-3 h-3 text-blue-600 shrink-0" title="Verified Seller" />
-            )}
           </div>
         </div>
       </div>

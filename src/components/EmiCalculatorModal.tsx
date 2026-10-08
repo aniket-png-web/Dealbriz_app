@@ -15,13 +15,8 @@ import {
 import confetti from 'canvas-confetti';
 import { EmiApplication, Listing } from '../types';
 import { defaultListingImage } from '../utils/imageUtils';
-import {
-  financersApi,
-  FinancerPartner,
-  locationsApi,
-  lookupPincode,
-  emiApi,
-} from '../services/dealbrizApi';
+import { locationsApi, emiApi, EmiSubmitPayload } from '../services/dealbrizApi';
+import { dealbrizStorage } from '../services/dealbrizStorage';
 
 interface EmiCalculatorModalProps {
   listing: Listing | null;
@@ -43,40 +38,46 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
   // Step 1: Calculator, Step 2: Instant Application KYC
   const [step, setStep] = useState<'calc' | 'apply' | 'success'>('calc');
 
-  // Application form fields
-  const [applicantName, setApplicantName] = useState('Aman Verma');
-  const [applicantPhone, setApplicantPhone] = useState('+91 98765 43210');
-  const [applicantPincode, setApplicantPincode] = useState('160017');
-  const [employmentType, setEmploymentType] = useState<'Salaried' | 'Self-Employed' | 'Student'>('Salaried');
-  const [monthlyIncome, setMonthlyIncome] = useState('₹50,000 - ₹75,000');
+  // Application form fields - prefilled from the signed-in account. These
+  // used to be a made-up person ("Aman Verma", +91 98765 43210, 160017).
+  const profile = dealbrizStorage.getUserProfile();
+  const profilePin = [profile.pincode, profile.city].find((v) => /^\d{6}$/.test((v || '').trim())) || '';
+  const [applicantName, setApplicantName] = useState(
+    profile.isAuthenticated && profile.name !== 'Guest User' ? profile.name : ''
+  );
+  const [applicantPhone, setApplicantPhone] = useState(profile.isAuthenticated ? profile.phone || '' : '');
+  const [applicantPincode, setApplicantPincode] = useState(profilePin);
+  const [monthlyIncome, setMonthlyIncome] = useState('');
 
-  // Section 3.16: GET /api/financers
-  const [financers, setFinancers] = useState<FinancerPartner[]>([]);
-  const [selectedFinancerId, setSelectedFinancerId] = useState<string>('');
-  const [pincodeArea, setPincodeArea] = useState<string>('Sector 17, Chandigarh (Punjab/UT)');
+  // Coverage as the server reports it. null = not checked / couldn't check.
+  const [coverage, setCoverage] = useState<{ available: boolean; message?: string } | null>(null);
+  const [checkingCoverage, setCheckingCoverage] = useState(false);
   const [submittingEmi, setSubmittingEmi] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submittedId, setSubmittedId] = useState<string>('');
+
+  const checkCoverage = async (pin: string) => {
+    if (!/^\d{6}$/.test(pin)) {
+      setCoverage(null);
+      return;
+    }
+    setCheckingCoverage(true);
+    const res = await locationsApi.checkEmiAvailability(pin);
+    setCheckingCoverage(false);
+    setCoverage(res);
+  };
 
   useEffect(() => {
-    financersApi.getFinancers().then((list) => {
-      setFinancers(list);
-      if (list.length > 0) setSelectedFinancerId(list[0].id);
-    }).catch(() => {});
+    if (applicantPincode) checkCoverage(applicantPincode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handlePincodeChange = async (pin: string) => {
-    setApplicantPincode(pin);
-    const clean = pin.replace(/\D/g, '');
-    if (clean.length === 6) {
-      const [res, avail] = await Promise.all([
-        lookupPincode(clean).catch(() => null),
-        locationsApi.checkEmiAvailability(clean).catch(() => ({ available: true, area: 'North India Active EMI Zone' })),
-      ]);
-      if (res) {
-        setPincodeArea(`${res.name}, ${res.district} (${res.state}) - EMI Served`);
-      } else if (avail?.available) {
-        setPincodeArea('North India Active EMI Zone');
-      }
-    }
+  const handlePincodeChange = (pin: string) => {
+    const clean = pin.replace(/\D/g, '').slice(0, 6);
+    setApplicantPincode(clean);
+    setSubmitError(null);
+    if (clean.length === 6) checkCoverage(clean);
+    else setCoverage(null);
   };
 
   // Math calculations
@@ -107,58 +108,57 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
 
   const handleApplySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmittingEmi(true);
+    if (submittingEmi) return;
+    setSubmitError(null);
 
-    const application: EmiApplication = {
-      id: `emi-app-${Date.now()}`,
-      listingId: listing?.id || 'custom-item',
-      listingTitle: listing?.title || 'Custom Financing Item',
-      listingPrice: price,
-      listingImage: listing?.image_url?.trim() || defaultListingImage(listing?.title, listing?.category),
-      downPayment: downPaymentAmount,
-      loanAmount: principal,
-      tenureMonths,
-      monthlyEmi,
-      interestRate: annualRate,
-      applicantName,
-      applicantPhone,
-      applicantPincode,
-      employmentType,
-      monthlyIncome,
-      status: 'in_review',
-      appliedAt: new Date().toISOString(),
-    };
-
-    try {
-      // Section 3.8: POST /api/emi
-      await emiApi.submitApplication({
-        product_id: application.listingId,
-        down_payment: downPaymentAmount,
-        tenure_months: tenureMonths,
-        applicant_name: applicantName,
-        applicant_phone: applicantPhone,
-        applicant_pincode: applicantPincode,
-        employment_type: employmentType,
-        monthly_income: monthlyIncome,
-      });
-    } catch {
-      // Handled gracefully in emiApi
-    } finally {
-      setSubmittingEmi(false);
+    const incomeNum = Number(monthlyIncome.replace(/[^\d.]/g, ''));
+    if (!incomeNum || incomeNum <= 0) {
+      setSubmitError('Please enter your monthly income.');
+      return;
+    }
+    if (!/^\d{6}$/.test(applicantPincode)) {
+      setSubmitError('Please enter a valid 6-digit PIN code.');
+      return;
     }
 
-    onSubmitApplication(application);
-    setStep('success');
+    // Same fields the website sends; the server requires all of them.
+    const payload: EmiSubmitPayload = {
+      product_id: listing?.id && !listing.id.startsWith('local-') ? listing.id : null,
+      product_title_snapshot: listing?.title || 'EMI request (no listing)',
+      product_image_snapshot: listing?.image_url?.trim() || null,
+      product_price_snapshot: price,
+      down_payment: downPaymentAmount,
+      tenure_months: tenureMonths,
+      interest_rate: annualRate,
+      loan_amount: principal,
+      monthly_emi: monthlyEmi,
+      // Matches the website: total of the monthly instalments.
+      total_payable: monthlyEmi * tenureMonths,
+      applicant_name: applicantName.trim(),
+      applicant_phone: applicantPhone.trim(),
+      applicant_income: incomeNum,
+      pincode: applicantPincode,
+    };
 
-    // Confetti celebration
+    setSubmittingEmi(true);
     try {
-      confetti({
-        particleCount: 80,
-        spread: 70,
-        origin: { y: 0.6 },
-      });
-    } catch {
-      // ignore
+      const saved = await emiApi.submitApplication(payload);
+      setSubmittedId(saved.id);
+      onSubmitApplication(saved);
+      setStep('success');
+      try {
+        confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+      } catch {
+        // ignore
+      }
+    } catch (err: any) {
+      setSubmitError(
+        err?.status === 0
+          ? "Couldn't reach DealBriz. Check your connection and try again."
+          : err?.data?.error || err?.message || 'Your application was not submitted. Please try again.'
+      );
+    } finally {
+      setSubmittingEmi(false);
     }
   };
 
@@ -303,7 +303,7 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
               onClick={() => setStep('apply')}
               className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-3 px-4 rounded-xl shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 active:scale-98 transition-all"
             >
-              <span>Instant EMI Pre-Approval</span>
+              <span>Apply for EMI</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
@@ -346,7 +346,7 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
 
             <div>
               <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                Mobile Number (for OTP & Instant KYC)
+                Mobile Number
               </label>
               <input
                 type="tel"
@@ -357,77 +357,65 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-[11px] font-semibold text-slate-600 block mb-1">PIN Code</label>
-                <input
-                  type="text"
-                  required
-                  maxLength={6}
-                  value={applicantPincode}
-                  onChange={(e) => handlePincodeChange(e.target.value)}
-                  className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-blue-500 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                  Employment
-                </label>
-                <select
-                  value={employmentType}
-                  onChange={(e: any) => setEmploymentType(e.target.value)}
-                  className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 focus:outline-none focus:border-blue-500"
-                >
-                  <option value="Salaried">Salaried</option>
-                  <option value="Self-Employed">Self-Employed</option>
-                  <option value="Student">Student</option>
-                </select>
-              </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                Your PIN Code
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                required
+                maxLength={6}
+                value={applicantPincode}
+                onChange={(e) => handlePincodeChange(e.target.value)}
+                placeholder="6-digit PIN"
+                className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-blue-500 font-mono"
+              />
             </div>
 
-            {/* Pincode verification badge */}
-            <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-200 text-[10px] text-emerald-700 flex items-center gap-1.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span className="truncate">{pincodeArea}</span>
-            </div>
-
-            {/* Section 3.16: Financing Partner Selection */}
-            {financers.length > 0 && (
-              <div>
-                <label className="text-[11px] font-semibold text-slate-600 block mb-1 flex items-center gap-1">
-                  <Building2 className="w-3.5 h-3.5 text-blue-600" />
-                  DealBriz Lending Partner
-                </label>
-                <select
-                  value={selectedFinancerId}
-                  onChange={(e) => setSelectedFinancerId(e.target.value)}
-                  className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-blue-500"
-                >
-                  {financers.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.name} {f.contact_phone ? `(${f.contact_phone})` : ''}
-                    </option>
-                  ))}
-                </select>
+            {/* Coverage, as the server reports it. Nothing is shown as
+                "available" unless the server said so. */}
+            {checkingCoverage ? (
+              <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 text-[10px] text-slate-500 flex items-center gap-1.5">
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                <span>Checking EMI availability…</span>
               </div>
-            )}
+            ) : coverage?.available ? (
+              <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-200 text-[10px] text-emerald-700 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>EMI is available for PIN {applicantPincode}.</span>
+              </div>
+            ) : coverage && !coverage.available ? (
+              <div className="p-2 rounded-xl bg-amber-50 border border-amber-200 text-[10px] text-amber-800 flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span>{coverage.message || 'EMI is not available in your area yet.'}</span>
+              </div>
+            ) : null}
 
             <div>
               <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                Monthly Income
+                Monthly Income (₹)
               </label>
-              <select
+<input
+                type="text"
+                inputMode="numeric"
+                required
                 value={monthlyIncome}
-                onChange={(e) => setMonthlyIncome(e.target.value)}
+                onChange={(e) => {
+                  setMonthlyIncome(e.target.value.replace(/[^\d]/g, ''));
+                  setSubmitError(null);
+                }}
+                placeholder="e.g. 25000"
                 className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-blue-500"
-              >
-                <option value="₹25,000 - ₹50,000">₹25,000 - ₹50,000</option>
-                <option value="₹50,000 - ₹75,000">₹50,000 - ₹75,000</option>
-                <option value="₹75,000 - ₹1,00,000">₹75,000 - ₹1,00,000</option>
-                <option value="₹1,00,000+">₹1,00,000+</option>
-              </select>
+              />
             </div>
+
+            {submitError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-1.5">
+                <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0 mt-px" />
+                <span>{submitError}</span>
+              </div>
+            )}
 
             <div className="flex items-center gap-2 pt-2">
               <button
@@ -439,9 +427,11 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-lg shadow-blue-600/30"
+                disabled={submittingEmi || coverage?.available === false}
+                className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-lg shadow-blue-600/30 disabled:opacity-60 flex items-center justify-center gap-1.5"
               >
-                Submit Application
+                {submittingEmi && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {submittingEmi ? 'Submitting…' : 'Submit Application'}
               </button>
             </div>
           </form>
@@ -467,7 +457,7 @@ export const EmiCalculatorModal: React.FC<EmiCalculatorModalProps> = ({
             <div className="p-3 bg-white rounded-xl border border-slate-200 text-xs text-left space-y-1 text-slate-500">
               <div className="flex justify-between">
                 <span>Application ID:</span>
-                <span className="font-mono text-slate-700">DBZ-{Math.floor(100000 + Math.random() * 900000)}</span>
+                <span className="font-mono text-slate-700">{submittedId.slice(0, 8).toUpperCase()}</span>
               </div>
               <div className="flex justify-between">
                 <span>Status:</span>

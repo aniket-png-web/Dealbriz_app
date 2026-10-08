@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { ChatConversation, ChatMessage, Listing } from '../types';
 import { defaultListingImage, initialsAvatar } from '../utils/imageUtils';
+import { chatApi, lookupPincode } from '../services/dealbrizApi';
+import { parseServerDate, parseThreadId } from '../services/chatBridge';
 
 interface ChatModalProps {
   conversation: ChatConversation | null;
@@ -80,20 +82,59 @@ export const ChatModal: React.FC<ChatModalProps> = ({
   const image = conversation?.listingImage || listing?.image_url;
   const sellerName =
     conversation?.sellerName ||
-    (isSeller ? 'DealBriz Buyer' : listing?.seller_name || 'Verified Seller');
+    (isSeller ? 'DealBriz Buyer' : listing?.seller_name || 'Seller');
   const sellerAvatar = conversation?.sellerAvatar || listing?.seller_avatar;
   // A number only shows when its owner has opted in. On the seller side that
   // field holds the signed-in user's own number, so it follows their setting;
   // on the buyer side the listing carries the seller's choice.
   const rawOtherPhone = isSeller
     ? conversation?.otherUserPhone
-    : conversation?.otherUserPhone || conversation?.sellerPhone || listing?.seller_phone;
+    : // The account's current setting (inbox, refreshed often), or the number
+      // from a listing page that was just fetched fresh. Not conversation
+      // .sellerPhone, which was copied from a listing when the chat started.
+      conversation?.otherUserPhone || listing?.seller_phone;
   const otherHidPhone = !isSeller && listing?.show_phone === false;
   const sellerPhone = otherHidPhone ? undefined : rawOtherPhone;
   // Same value drives the info panel row.
   const partyPhone = sellerPhone;
-  const sellerLocation = listing?.city || listing?.location || '';
-  const sellerJoined = listing?.seller_joined || '';
+
+  // "About this person" describes the OTHER person, from their own public
+  // profile (GET /api/users/<id>). Location used to be the listing's PIN, so
+  // a seller looking at a buyer saw the ad's location, not the buyer's.
+  const otherUserId =
+    conversation?.otherUserId || (conversation ? parseThreadId(conversation.id)?.otherUserId : '') || '';
+  const [partyLocation, setPartyLocation] = useState('');
+  const [partyJoined, setPartyJoined] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    setPartyLocation('');
+    setPartyJoined('');
+    if (!otherUserId) return;
+    (async () => {
+      const prof = await chatApi.getUserProfileById(otherUserId);
+      if (cancelled || !prof) return;
+      if (prof.created_at) {
+        const d = parseServerDate(prof.created_at);
+        if (!Number.isNaN(d.getTime())) {
+          setPartyJoined(d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }));
+        }
+      }
+      const city = (prof.city || '').trim();
+      if (/^\d{6}$/.test(city)) {
+        // Accounts store a PIN code here; show the place, not the number.
+        const place = await lookupPincode(city);
+        if (cancelled) return;
+        setPartyLocation(place ? [place.district, place.state].filter(Boolean).join(', ') : city);
+      } else {
+        setPartyLocation(city);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [otherUserId]);
+  const sellerLocation = partyLocation;
+  const sellerJoined = partyJoined;
 
   // Only real messages. This used to fall back to a fabricated greeting that
   // looked like the seller had written it.
@@ -439,10 +480,7 @@ export const ChatModal: React.FC<ChatModalProps> = ({
                 </div>
                 <div>
                   <strong className="block text-sm text-slate-900">{sellerName}</strong>
-                  <span className="text-xs text-emerald-600 font-medium flex items-center gap-1 mt-0.5">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    DealBriz Verified Member
-                  </span>
+                  <span className="text-xs text-slate-500 font-medium mt-0.5 block">DealBriz member</span>
                 </div>
               </div>
 

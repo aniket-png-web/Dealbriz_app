@@ -3,7 +3,7 @@
 // as defined in the official DealBriz API Documentation.
 
 import { Capacitor, CapacitorCookies } from '@capacitor/core';
-import { Listing } from '../types';
+import { EmiApplication, Listing } from '../types';
 import { dealbrizStorage } from './dealbrizStorage';
 import { initialsAvatar } from '../utils/imageUtils';
 
@@ -243,37 +243,50 @@ export interface PincodeLookupResult {
 }
 
 /**
- * 2.1 India Post Pincode Lookup API
- * Endpoint: https://api.postalpincode.in/pincode/{pincode}
- * Resolves 6-digit PIN code to district and state without backend involvement.
+ * Resolves a 6-digit PIN code to its post office, district and state.
+ *
+ * Asks DealBriz's own server first (GET /api/locations/search, backed by the
+ * pincodes table - the same data the server uses to name a listing's
+ * location). The public India Post API is only a fallback: it is often slow
+ * or down, and when it failed the Sell form kept its default location.
  */
 export async function lookupPincode(pincode: string): Promise<PincodeLookupResult | null> {
   const cleanPin = pincode.replace(/\D/g, '');
   if (cleanPin.length !== 6) return null;
 
   try {
+    const res = await apiFetch<{ results?: any[] }>(
+      `/locations/search?q=${encodeURIComponent(cleanPin)}&limit=25`
+    );
+    const rows = (res?.results || []).filter((r) => String(r.pincode) === cleanPin);
+    if (rows.length) {
+      const row = rows.find((r) => r.is_major) || rows[0];
+      return {
+        pincode: cleanPin,
+        district: row.district || '',
+        state: row.state || '',
+        name: row.office_name || '',
+      };
+    }
+  } catch {
+    // fall through to India Post
+  }
+
+  try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
-
     const res = await fetch(`https://api.postalpincode.in/pincode/${cleanPin}`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);
-
     if (!res.ok) return null;
     const data = await res.json();
-
     if (Array.isArray(data) && data[0]?.Status === 'Success' && Array.isArray(data[0]?.PostOffice) && data[0].PostOffice.length > 0) {
       const po = data[0].PostOffice[0];
-      return {
-        pincode: cleanPin,
-        district: po.District || '',
-        state: po.State || '',
-        name: po.Name || '',
-      };
+      return { pincode: cleanPin, district: po.District || '', state: po.State || '', name: po.Name || '' };
     }
-  } catch (err) {
-    // Fail silently as specified in DealBriz API docs
+  } catch {
+    // unreachable
   }
   return null;
 }
@@ -473,6 +486,8 @@ export interface AuthUser {
   is_admin: boolean;
   account_status: string;
   created_at: string;
+  /** Profile "show my mobile number" setting. null = never set. */
+  show_phone?: boolean | null;
 }
 
 interface StoredAccount extends AuthUser {
@@ -722,6 +737,12 @@ export const buyApi = {
       // Fallback to local data
     }
     return dealbrizStorage.getListings();
+  },
+
+  /** GET /api/buy/<id> - one listing as it is right now. Throws on failure. */
+  async getListing(id: string): Promise<Listing> {
+    const res = await apiFetch<any>(`/buy/${encodeURIComponent(id)}`);
+    return mapDealBrizProductToListing(res);
   },
 
   async search(keyword: string): Promise<Listing[]> {
@@ -995,72 +1016,97 @@ export const profileApi = {
   },
 };
 
+/**
+ * Saved items on the account - the same list the website shows.
+ * GET /api/saved returns full listings; POST/DELETE /api/saved/<id>.
+ * These throw on failure. They used to fall back to a list kept only on the
+ * phone, which is why saves made in the app never appeared on the website.
+ */
 export const savedApi = {
-  async getSaved(): Promise<string[]> {
-    try {
-      const res = await apiFetch<any>('/saved');
-      const list = Array.isArray(res) ? res : res.saved || [];
-      return list.map((item: any) => (typeof item === 'string' ? item : item.id || item.product_id));
-    } catch {
-      return dealbrizStorage.getSavedIds();
-    }
+  async getSaved(): Promise<Listing[]> {
+    const res = await apiFetch<any>('/saved');
+    const rows = Array.isArray(res) ? res : [];
+    return rows.map(mapDealBrizProductToListing);
   },
 
   async save(productId: string): Promise<void> {
-    try {
-      await apiFetch(`/saved/${productId}`, { method: 'POST' });
-    } catch {
-      // ignore
-    }
-    dealbrizStorage.toggleSaveId(productId);
+    await apiFetch(`/saved/${encodeURIComponent(productId)}`, { method: 'POST' });
   },
 
   async unsave(productId: string): Promise<void> {
-    try {
-      await apiFetch(`/saved/${productId}`, { method: 'DELETE' });
-    } catch {
-      // ignore
-    }
-    dealbrizStorage.toggleSaveId(productId);
+    await apiFetch(`/saved/${encodeURIComponent(productId)}`, { method: 'DELETE' });
   },
 };
 
 // 3.8 EMI API
+/** Same fields the website sends (frontend/app.js submitEMI). */
 export interface EmiSubmitPayload {
-  product_id: string;
+  product_id?: string | null;
+  product_title_snapshot: string;
+  product_image_snapshot?: string | null;
+  product_price_snapshot: number;
   down_payment: number;
   tenure_months: number;
-  applicant_name?: string;
-  applicant_phone?: string;
-  applicant_pincode?: string;
-  employment_type?: string;
-  monthly_income?: string;
+  interest_rate: number;
+  loan_amount: number;
+  monthly_emi: number;
+  total_payable: number;
+  applicant_name: string;
+  applicant_phone: string;
+  applicant_income?: number | null;
+  /** Where the applicant lives; the server checks EMI coverage against it. */
+  pincode?: string;
+}
+
+/** Labels match the website's EMI_STATUS_LABELS. */
+export const EMI_STATUS_LABELS: Record<string, string> = {
+  pending: 'Under review',
+  review: 'Docs needed',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  disbursed: 'Disbursed',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+};
+
+function mapServerEmi(a: any): EmiApplication {
+  return {
+    id: String(a.id),
+    listingId: a.product_id ? String(a.product_id) : '',
+    listingTitle: a.product_title_snapshot || 'EMI application',
+    listingPrice: Number(a.product_price_snapshot) || 0,
+    listingImage: absoluteMediaUrl(a.product_image_snapshot) || '',
+    downPayment: Number(a.down_payment) || 0,
+    loanAmount: Number(a.loan_amount) || 0,
+    tenureMonths: Number(a.tenure_months) || 0,
+    monthlyEmi: Number(a.monthly_emi) || 0,
+    interestRate: Number(a.interest_rate) || 0,
+    applicantName: a.applicant_name || '',
+    applicantPhone: a.applicant_phone || '',
+    monthlyIncome: a.applicant_income ?? null,
+    status: a.status || 'pending',
+    appliedAt: a.applied_at || '',
+  };
 }
 
 export const emiApi = {
-  async submitApplication(payload: EmiSubmitPayload): Promise<any> {
-    try {
-      return await apiFetch('/emi', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    } catch {
-      return {
-        id: `emi-${Date.now()}`,
-        status: 'review',
-        applied_at: new Date().toISOString(),
-      };
-    }
+  /**
+   * Throws on failure. This used to swallow every error and return a made-up
+   * "review" record, so the app showed "Application submitted" for
+   * applications the server had rejected or never received.
+   */
+  async submitApplication(payload: EmiSubmitPayload): Promise<EmiApplication> {
+    const res = await apiFetch<any>('/emi', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return mapServerEmi(res);
   },
 
-  async getMyApplications(): Promise<any[]> {
-    try {
-      const res = await apiFetch<any[]>('/emi/mine');
-      if (Array.isArray(res)) return res;
-    } catch {
-      // ignore
-    }
-    return dealbrizStorage.getEmiApps();
+  /** The signed-in user's applications, from the server only. */
+  async getMyApplications(): Promise<EmiApplication[]> {
+    const res = await apiFetch<any[]>('/emi/mine');
+    return (Array.isArray(res) ? res : []).filter((a) => !a.is_archived).map(mapServerEmi);
   },
 };
 
@@ -1071,11 +1117,12 @@ export interface NotificationsSummary {
 }
 
 export const notificationsApi = {
-  async getSummary(): Promise<NotificationsSummary> {
+  /** null when it couldn't be fetched (it used to invent 1 notification). */
+  async getSummary(): Promise<NotificationsSummary | null> {
     try {
       return await apiFetch<NotificationsSummary>('/notifications/summary');
     } catch {
-      return { notifications: 1, chats: 0 };
+      return null;
     }
   },
 
@@ -1108,57 +1155,74 @@ export interface ReportReason {
 }
 
 export const reportsApi = {
+  /** Same list the server validates against (reports/routes.py REPORT_REASONS). */
   async getReasons(): Promise<ReportReason[]> {
     try {
       const res = await apiFetch<ReportReason[]>('/reports/reasons');
-      if (Array.isArray(res)) return res;
+      if (Array.isArray(res) && res.length) return res;
     } catch {
-      // fallback
+      // fallback below
     }
     return [
       { label: 'Fraud or scam', value: 'fraud_scam' },
       { label: 'Fake or misleading listing', value: 'fake_listing' },
-      { label: 'Offensive or abusive content', value: 'offensive_content' },
-      { label: 'Already sold / inactive', value: 'already_sold' },
-      { label: 'Other problem', value: 'other' },
+      { label: 'Counterfeit goods', value: 'counterfeit' },
+      { label: 'Harassment or abusive behaviour', value: 'harassment' },
+      { label: 'Prohibited item', value: 'prohibited_item' },
+      { label: 'Payment problem', value: 'payment_issue' },
+      { label: 'Other', value: 'other' },
     ];
   },
 
+  /** Same list as the server's PROBLEM_REASONS. */
   async getProblemReasons(): Promise<ReportReason[]> {
     try {
       const res = await apiFetch<ReportReason[]>('/reports/problem-reasons');
-      if (Array.isArray(res)) return res;
+      if (Array.isArray(res) && res.length) return res;
     } catch {
-      // fallback
+      // fallback below
     }
     return [
-      { label: 'Technical bug on page', value: 'bug' },
-      { label: 'Cannot log in or verify phone', value: 'auth_issue' },
-      { label: 'EMI calculation inquiry', value: 'emi_inquiry' },
-      { label: 'Feedback / suggestion', value: 'feedback' },
+      { label: 'Something is broken', value: 'bug' },
+      { label: 'Problem with a listing', value: 'listing_issue' },
+      { label: 'Payment or EMI problem', value: 'payment_issue' },
+      { label: 'Account or login problem', value: 'account_issue' },
+      { label: 'Abuse or unsafe behaviour', value: 'abuse' },
+      { label: 'Feedback or suggestion', value: 'feedback' },
+      { label: 'Something else', value: 'other' },
     ];
   },
 
-  async submitReport(payload: { product_id?: string; user_id?: string; reason: string; notes?: string }): Promise<void> {
-    try {
-      await apiFetch('/reports', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    } catch (err) {
-      console.warn('Could not submit report to server:', err);
-    }
+  /**
+   * POST /api/reports - reports a seller, optionally about one listing.
+   * Throws on failure; this used to swallow errors so the app said "Report
+   * Submitted" for every report the server rejected.
+   */
+  async submitReport(payload: {
+    reported_user_id: string;
+    product_id?: string;
+    reason: string;
+    details?: string;
+  }): Promise<void> {
+    await apiFetch('/reports', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   },
 
-  async submitProblem(payload: { email: string; reason: string; description: string }): Promise<void> {
-    try {
-      await apiFetch('/reports/problem', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    } catch (err) {
-      console.warn('Could not submit problem to server:', err);
-    }
+  /**
+   * POST /api/reports/problem. Signed-in users needn't send an email - the
+   * server uses the account's. Throws on failure.
+   */
+  async submitProblem(payload: {
+    reason: string;
+    details: string;
+    contact_email?: string;
+  }): Promise<void> {
+    await apiFetch('/reports/problem', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   },
 };
 
@@ -1182,7 +1246,10 @@ export interface DealBrizConversationRow {
   body: string;
   created_at: string;
   is_read: boolean;
-  receiver_id?: string;
+  sender_id: string;
+  receiver_id: string;
+  /** Only present when that user chose to show their number. */
+  other_user_phone?: string | null;
 }
 
 export interface UserPartyProfile {
@@ -1365,11 +1432,17 @@ export const locationsApi = {
     }
   },
 
-  async checkEmiAvailability(pincode: string): Promise<{ available: boolean; area?: string }> {
+  /**
+   * The server's coverage answer, or null if it couldn't be reached. Used to
+   * report "available" when the request failed, which invented coverage.
+   */
+  async checkEmiAvailability(
+    pincode: string
+  ): Promise<{ available: boolean; message?: string } | null> {
     try {
       return await apiFetch(`/locations/emi-availability?pincode=${encodeURIComponent(pincode)}`);
     } catch {
-      return { available: true, area: 'North India Zone' };
+      return null;
     }
   },
 };
@@ -1526,6 +1599,16 @@ const PINCODE_TO_CITY: Record<string, string> = {
 };
 
 // Mapper from DealBriz Flask API shape to client Listing type
+
+/** Normalises a listing's phone setting. Anything unclear counts as hidden. */
+function showPhoneFlag(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') {
+    return ['yes', '1', 'true', 'show'].includes(value.trim().toLowerCase());
+  }
+  return false;
+}
+
 export function mapDealBrizProductToListing(p: any): Listing {
   const sellerName = p.seller_name || 'DealBriz Seller';
   // The backend only exposes a phone number when the seller opted in to show it.
@@ -1579,12 +1662,10 @@ export function mapDealBrizProductToListing(p: any): Listing {
     negotiable: Boolean(p.negotiable ?? true),
     seller_name: sellerName,
     seller_phone: sellerPhone,
-    show_phone:
-      typeof p.show_phone === 'boolean'
-        ? p.show_phone
-        : typeof p.seller_show_phone === 'boolean'
-          ? p.seller_show_phone
-          : undefined,
+    // The API sends "yes" or "chat_only" (older rows also had "1"/"0").
+    // This used to accept only a real boolean, so every listing came out
+    // undefined - which the UI treated as "not hidden".
+    show_phone: showPhoneFlag(p.show_phone),
     seller_avatar: sellerAvatar,
     seller_rating: Number(p.seller_rating) || 0,
     seller_reviews_count: Number(p.seller_reviews_count) || 0,

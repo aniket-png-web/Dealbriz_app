@@ -107,7 +107,8 @@ export function conversationForListing(
 /** Maps the server's conversation list into the app's inbox shape. */
 export function mapConversationRow(
   row: DealBrizConversationRow,
-  listings: Listing[]
+  listings: Listing[],
+  myUserId: string
 ): ChatConversation {
   const listing = listings.find((l) => l.id === String(row.product_id));
   const decoded = decodeMessageBody(row.body || '');
@@ -123,12 +124,9 @@ export function mapConversationRow(
     sellerName: row.other_user_name || 'DealBriz User',
     sellerAvatar: row.other_user_avatar || initialsAvatar(row.other_user_name || 'User'),
     sellerPhone: listing?.seller_phone,
-    // Populated only if the server chooses to include it (gated by the other
-    // user's show_phone setting). Absent today; wired so it works on arrival.
-    otherUserPhone:
-      (row as any).other_user_phone ||
-      (row as any).otherUserPhone ||
-      undefined,
+    // Sent by the server only when the other user switched "show my number"
+    // on in their Profile; otherwise null.
+    otherUserPhone: row.other_user_phone || undefined,
     messages: [
       {
         id: `preview-${row.product_id}-${row.other_user_id}`,
@@ -137,16 +135,23 @@ export function mapConversationRow(
         timestamp: formatTime(row.created_at),
       },
     ],
-    unreadCount: row.is_read ? 0 : 1,
+    // The row is the thread's latest message. Its is_read flag says whether
+    // the RECEIVER has read it - so when that message is one I sent, it means
+    // "the other person hasn't read it yet", not "I have something unread".
+    // Treating it as mine is what kept a dot on every chat I'd replied in.
+    unreadCount: String(row.receiver_id) === String(myUserId) && !row.is_read ? 1 : 0,
     lastUpdated: row.created_at,
   };
 }
 
 /** Loads the signed-in user's inbox. */
-export async function loadInbox(listings: Listing[]): Promise<ChatConversation[]> {
+export async function loadInbox(
+  listings: Listing[],
+  myUserId: string
+): Promise<ChatConversation[]> {
   const rows = await chatApi.getMyConversations();
   return rows
-    .map((row) => mapConversationRow(row, listings))
+    .map((row) => mapConversationRow(row, listings, myUserId))
     .sort(
       (a, b) => parseServerDate(b.lastUpdated).getTime() - parseServerDate(a.lastUpdated).getTime()
     );

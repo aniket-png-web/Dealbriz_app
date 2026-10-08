@@ -60,7 +60,7 @@ export const AndroidFrame: React.FC<AndroidFrameProps> = ({ children, onInstallP
               <span className="text-xs font-bold text-slate-700">DealBriz Android Client</span>
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-medium flex items-center gap-1">
                 <ShieldCheck className="w-2.5 h-2.5" />
-                Verified Mirror
+                Web Preview
               </span>
             </div>
             <p className="text-[10px] text-slate-500 hidden sm:block">

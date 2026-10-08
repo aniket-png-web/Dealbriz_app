@@ -186,20 +186,6 @@ export const FilterModal: React.FC<FilterModalProps> = ({
               />
             </label>
 
-            <label className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-slate-200 cursor-pointer">
-              <span className="text-xs font-medium text-slate-700">Verified Sellers Only</span>
-              <input
-                type="checkbox"
-                checked={filters.verifiedOnly}
-                onChange={(e) =>
-                  onUpdateFilters({
-                    ...filters,
-                    verifiedOnly: e.target.checked,
-                  })
-                }
-                className="w-4 h-4 accent-blue-600 rounded"
-              />
-            </label>
           </div>
 
           {/* Actions */}

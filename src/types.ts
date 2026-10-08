@@ -79,7 +79,6 @@ export interface FilterState {
   maxPrice: number | null;
   condition: string | null;
   emiOnly: boolean;
-  verifiedOnly: boolean;
   sortBy: 'recommended' | 'price_low' | 'price_high' | 'recent' | 'distance';
 }
 
@@ -124,10 +123,9 @@ export interface EmiApplication {
   interestRate: number;
   applicantName: string;
   applicantPhone: string;
-  applicantPincode: string;
-  employmentType: 'Salaried' | 'Self-Employed' | 'Student';
-  monthlyIncome: string;
-  status: 'approved' | 'in_review';
+  monthlyIncome?: number | null;
+  /** Server status: pending | review | approved | rejected | disbursed | completed | cancelled */
+  status: string;
   appliedAt: string;
 }
 

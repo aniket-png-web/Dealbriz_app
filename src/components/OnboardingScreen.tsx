@@ -35,7 +35,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
         </h2>
         <p className="mt-1.5 text-xs text-blue-100 flex items-center gap-1.5">
           <ShieldCheck className="w-3.5 h-3.5" />
-          Verified. Local. Trusted.
+          Local deals, direct chats.
         </p>
 
         <button

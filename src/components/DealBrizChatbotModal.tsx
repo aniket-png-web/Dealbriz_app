@@ -91,7 +91,7 @@ export const DealBrizChatbotModal: React.FC<DealBrizChatbotModalProps> = ({
         {
           id: `b-${Date.now()}`,
           sender: 'bot',
-          text: 'DealBriz support is available 24/7. You can browse verified listings or apply for EMI directly.',
+          text: 'DealBriz support is available 24/7. You can browse listings or apply for EMI directly.',
           timestamp: 'Just now',
         },
       ]);
